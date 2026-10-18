@@ -122,8 +122,13 @@ const vecOf = (food, g) => nutritionFor(food, g);
  * Nutrition for `grams` of `food` described by a cooking note.
  * Returns { nutrition, detail, understood } where `detail` explains what was added or changed.
  */
-export function applyCooking(food, gramsEaten, cookingText) {
+export function applyCooking(food, gramsEaten, cookingText, nameText = '') {
   const cook = parseCooking(cookingText);
+  // Flours are also read from the food's own name, for example "chapati (oats and wheat flour)".
+  if (!cook.flours && nameText) {
+    const fromName = parseCooking(nameText);
+    if (fromName.flours) { cook.flours = fromName.flours; cook.floursAssumedEqual = fromName.floursAssumedEqual; }
+  }
   const details = [];
   let used = false;
 
@@ -197,7 +202,7 @@ function describe(details, used, cookingText) {
 /* ------------------------------ Checking AI estimates ------------------------------ */
 
 /** Grams or ml when the quantity text states them explicitly (for example "150 g"), otherwise null. */
-function statedGrams(quantity) {
+export function statedGrams(quantity) {
   const m = /(\d+(?:\.\d+)?)\s*(kg|gms?|grams?|g|ml|l|litres?|liters?)\b/i.exec(String(quantity || ''));
   if (!m) return null;
   const n = parseFloat(m[1]);
@@ -246,4 +251,11 @@ export function checkEstimate(item) {
   }
   if (notes.length) out.check = notes.join('; ');
   return out;
+}
+
+/** Grams for a quantity text: an explicit weight such as "(150 g)" wins, otherwise the food's portion rules apply. */
+export function gramsFromQuantity(quantity, food) {
+  const stated = statedGrams(quantity);
+  if (stated) return { grams: Math.round(stated), assumed: false, basis: `${Math.round(stated)} g stated` };
+  return estimateGrams(quantity || '', food);
 }

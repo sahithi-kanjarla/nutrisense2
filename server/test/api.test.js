@@ -489,3 +489,26 @@ test('meal review: the original photo route still works', async () => {
   assert.equal(r.source, 'photo');
   assert.equal(r.items[0].name, 'Idli');
 });
+
+test('first-pass AI results for known foods are recalculated from the table, with the AI figure kept', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  groqReply = () => ({
+    json: {
+      items: [
+        { name: 'chapati, oats and wheat flour', quantity: '2 pieces', cooking: 'very little oil', origin: 'user', confidence: 'high', kcal: 220, protein: 7, carbs: 40, fat: 4, fiber: 4 },
+        { name: 'Rice', quantity: '1 bowl (150 g)', origin: 'user', confidence: 'high', kcal: 400, protein: 8, carbs: 80, fat: 2, fiber: 1 },
+        { name: 'Thalipeeth', quantity: '1 piece', origin: 'assumed', confidence: 'medium', kcal: 180, protein: 5, carbs: 28, fat: 5, fiber: 3 }
+      ]
+    }
+  });
+  const r = await api('POST', '/meals/analyze', { text: 'chapati with oats flour and wheat flour, very little oil, rice, thalipeeth', today: TODAY }, d.token);
+  const [chapati, rice, unknownFood] = r.items;
+  assert.equal(chapati.kcal, 233, 'equal oats and wheat blend, light oil, 2 x 40 g');
+  assert.equal(chapati.ai_kcal, 220, 'the AI figure is kept for comparison');
+  assert.ok(chapati.detail.includes('flour blend') && chapati.detail.includes('equal parts assumed'));
+  assert.equal(chapati.basis, '2 pieces x 40 g');
+  assert.equal(rice.kcal, 195, '150 g stated in the text wins over the "1 bowl" wording');
+  assert.ok(rice.check.includes('400'), 'a big gap from the AI figure is flagged');
+  assert.equal(unknownFood.kcal, 180, 'foods the table does not know keep the AI estimate');
+  assert.equal(unknownFood.data_source, undefined);
+});

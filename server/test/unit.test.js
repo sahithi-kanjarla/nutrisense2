@@ -233,3 +233,12 @@ test('table integrity: every entry has sane values and every recipe ingredient e
   }
   assert.equal(new Set(FOOD_TABLE.map((f) => f.name)).size, FOOD_TABLE.length, 'food names are unique');
 });
+
+test('flours named in the food name are used, not only those in the cooking note', () => {
+  const roti = FOOD_TABLE.find((f) => f.name === 'roti');
+  const r = applyCooking(roti, 80, 'very little oil', 'chapati, oats and wheat flour');
+  assert.equal(r.nutrition.kcal, 233);
+  assert.ok(r.detail.includes('flour blend'));
+  const plain = applyCooking(roti, 80, 'very little oil', 'chapati');
+  assert.ok(!plain.detail.includes('flour blend'));
+});

@@ -4,7 +4,7 @@ import { addDays } from '../dates.js';
 import { q, tx } from '../db.js';
 import { checkConflicts, describeConflict, prefsFromProfile, DIET_RULES, ALLERGY_LABELS } from '../safety.js';
 import { findFood, estimateGrams, nutritionFor, per100, normalize } from '../foods.js';
-import { applyCooking, checkEstimate } from '../nutrition.js';
+import { applyCooking, checkEstimate, gramsFromQuantity } from '../nutrition.js';
 import { targetsOf, remainingOf, matchPantry, hasNutrition, stockGrams } from '../data.js';
 
 const clamp = (v, min, max, d = 0) => { const x = Number(v); return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : d; };
@@ -189,6 +189,29 @@ function mealWarnings(text, profile) {
   return out;
 }
 
+/**
+ * The AI is good at recognising foods and bad at arithmetic. When it names a food we know and gives an
+ * amount, the numbers are recalculated from the table (or the ingredient recipe, with any cooking note),
+ * and the AI's own figure is kept for comparison.
+ */
+function repriceKnown(item) {
+  const food = findFood(item.name, 'meal');
+  if (!food) return item;
+  const amount = gramsFromQuantity(item.quantity, food);
+  if (!amount.grams) return item;
+  const cooked = applyCooking(food, amount.grams, item.cooking, item.name);
+  const gap = Math.abs(item.kcal - cooked.nutrition.kcal);
+  const out = {
+    ...item, ...cooked.nutrition, basis: amount.basis, data_source: food.source, ai_kcal: item.kcal,
+    confidence: amount.assumed && item.confidence === 'high' ? 'medium' : item.confidence
+  };
+  delete out.check;
+  delete out.reference_kcal;
+  if (cooked.detail) out.detail = cooked.detail;
+  if (gap > Math.max(60, 0.45 * cooked.nutrition.kcal)) out.check = `the AI estimated ${item.kcal} kcal; this uses the food table instead`;
+  return out;
+}
+
 const PHOTO_ALLERGY_NOTE = 'A photo cannot show hidden ingredients such as nuts, dairy or egg, so please check these foods against your allergies yourself.';
 
 /**
@@ -211,7 +234,7 @@ export async function analyzeMeal(text, profile, { image = null, answers = [], c
       tier: image ? 'heavy' : 'light', json: true, temperature: 0.2, maxTokens: 1400, system: MEAL_SYSTEM,
       messages: [{ role: 'user', content: parts.join('\n') }], images: image ? [image] : []
     });
-    const items = cleanMealItems(res.json?.items);
+    const items = cleanMealItems(res.json?.items).map(repriceKnown);
     if (items.length) ai = { items, notes: txt(res.json?.notes, 160), questions: cleanQuestions(res.json?.questions), provider: res.provider };
     else if (image && !clean) aiError = new HttpError(422, txt(res.json?.notes, 160) || 'No food was recognised in that photo.', 'unrecognised');
   } catch (err) {
@@ -259,7 +282,7 @@ export async function estimateItems(rawItems, profile) {
 
   const fromTable = (it, food) => {
     const est = estimateGrams(it.quantity || it.name, food);
-    const cooked = it.cooking ? applyCooking(food, est.grams, it.cooking) : null;
+    const cooked = applyCooking(food, est.grams, it.cooking, it.name);
     return {
       name: it.name, quantity: it.quantity || `${est.grams} ${food.unit === 'ml' ? 'ml' : 'g'} (assumed)`, cooking: it.cooking,
       origin: 'user', confidence: est.assumed ? 'medium' : 'high',
