@@ -449,20 +449,26 @@ test('meal review: recalculating edited foods uses the table, AI for cooking not
   assert.ok(t.items[0].kcal > 150 && t.items[0].kcal < 300);
   assert.equal(t.totals.kcal, t.items[0].kcal);
 
-  // Cooking note: the AI sees it and the user's wording is kept.
-  groqReply = () => ({ json: { items: [{ name: 'x', quantity: '2 pieces', kcal: 200, protein: 7, carbs: 34, fat: 4, fiber: 5 }] } });
+  // Cooking note on a known food: calculated exactly (flour blend + oil), no AI call, and the user's wording is kept.
   const c = await api('POST', '/meals/estimate-items', { items: [{ name: 'Chapati', quantity: '2 pieces', cooking: 'oats flour and wheat flour, very little oil' }], today: TODAY }, d.token);
+  assert.equal(calls.gemini.length + calls.groq.length, 0, 'known foods never need the AI');
   assert.equal(c.items[0].name, 'Chapati');
   assert.equal(c.items[0].cooking, 'oats flour and wheat flour, very little oil');
-  assert.equal(c.items[0].kcal, 200);
+  assert.ok(c.items[0].detail.includes('flour blend') && c.items[0].detail.includes('light oil'));
+  assert.ok(c.items[0].kcal > 200 && c.items[0].kcal < 260);
+  assert.equal(c.items[0].basis, '2 pieces x 40 g');
+
+  // A food the table does not know goes to the AI, which sees the cooking note.
+  groqReply = () => ({ json: { items: [{ name: 'x', quantity: '1 plate', kcal: 200, protein: 7, carbs: 34, fat: 4, fiber: 5 }] } });
+  const g = await api('POST', '/meals/estimate-items', { items: [{ name: 'Thalipeeth', quantity: '1 plate', cooking: 'shallow fried with very little oil' }], today: TODAY }, d.token);
+  assert.equal(g.items[0].kcal, 200);
   assert.ok(JSON.stringify(calls.groq[0]).includes('very little oil'));
 
-  // AI down: a cooking note on a known food falls back to the table and says so; a stranger food is unknown.
+  // AI down: a stranger food is reported as unknown and is not counted as zero-calorie food.
   groqReply = () => ({ status: 503, body: { error: { message: 'down' } } });
   geminiReply = () => ({ status: 503, body: { error: { message: 'down' } } });
-  const f = await api('POST', '/meals/estimate-items', { items: [{ name: 'roti', quantity: '2 pieces', cooking: 'with ghee' }, { name: 'zorblax', quantity: '1 cup' }], today: TODAY }, d.token);
-  assert.equal(f.items[0].cooking_ignored, true);
-  assert.ok(f.notes.includes('cooking notes'));
+  const f = await api('POST', '/meals/estimate-items', { items: [{ name: 'roti', quantity: '2 pieces', cooking: 'with 1 tsp ghee' }, { name: 'zorblax', quantity: '1 cup' }], today: TODAY }, d.token);
+  assert.ok(f.items[0].detail.includes('ghee'));
   assert.equal(f.items[1].unknown, true);
   assert.deepEqual(f.unknown, ['zorblax']);
   assert.equal(f.totals.kcal, f.items[0].kcal, 'unknown foods are not counted as zero-calorie food');
@@ -482,4 +488,27 @@ test('meal review: the original photo route still works', async () => {
   const r = await api('POST', '/meals/analyze-photo', { image: PIXEL, mime: 'image/png' }, d.token);
   assert.equal(r.source, 'photo');
   assert.equal(r.items[0].name, 'Idli');
+});
+
+test('first-pass AI results for known foods are recalculated from the table, with the AI figure kept', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  groqReply = () => ({
+    json: {
+      items: [
+        { name: 'chapati, oats and wheat flour', quantity: '2 pieces', cooking: 'very little oil', origin: 'user', confidence: 'high', kcal: 220, protein: 7, carbs: 40, fat: 4, fiber: 4 },
+        { name: 'Rice', quantity: '1 bowl (150 g)', origin: 'user', confidence: 'high', kcal: 400, protein: 8, carbs: 80, fat: 2, fiber: 1 },
+        { name: 'Thalipeeth', quantity: '1 piece', origin: 'assumed', confidence: 'medium', kcal: 180, protein: 5, carbs: 28, fat: 5, fiber: 3 }
+      ]
+    }
+  });
+  const r = await api('POST', '/meals/analyze', { text: 'chapati with oats flour and wheat flour, very little oil, rice, thalipeeth', today: TODAY }, d.token);
+  const [chapati, rice, unknownFood] = r.items;
+  assert.equal(chapati.kcal, 233, 'equal oats and wheat blend, light oil, 2 x 40 g');
+  assert.equal(chapati.ai_kcal, 220, 'the AI figure is kept for comparison');
+  assert.ok(chapati.detail.includes('flour blend') && chapati.detail.includes('equal parts assumed'));
+  assert.equal(chapati.basis, '2 pieces x 40 g');
+  assert.equal(rice.kcal, 195, '150 g stated in the text wins over the "1 bowl" wording');
+  assert.ok(rice.check.includes('400'), 'a big gap from the AI figure is flagged');
+  assert.equal(unknownFood.kcal, 180, 'foods the table does not know keep the AI estimate');
+  assert.equal(unknownFood.data_source, undefined);
 });

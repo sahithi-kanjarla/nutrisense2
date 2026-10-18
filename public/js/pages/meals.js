@@ -83,7 +83,7 @@ export default async function meals(root) {
   const badge = (i) => (i.origin === 'photo' ? html`<span class="tag gray">Seen in photo</span>` : i.origin === 'assumed' ? html`<span class="tag amber">Assumed</span>` : html`<span class="tag">You said</span>`);
   const nutLine = (i) => (i.unknown ? 'Not recognised. Rename it, add an amount or cooking note, or remove it.'
     : i._dirty ? 'Edited. Press Recalculate to update the numbers.'
-      : `${num(i.kcal)} kcal · ${num(i.protein, 1)}P · ${num(i.carbs, 1)}C · ${num(i.fat, 1)}F`);
+      : `${num(i.kcal)} kcal · ${num(i.protein, 1)}P · ${num(i.carbs, 1)}C · ${num(i.fat, 1)}F${i.basis ? ` · ${i.basis}` : ''}${i.detail ? ` · ${i.detail}` : ''}${i.check ? ` · Check: ${i.check}` : ''}`);
   const statusText = () => {
     const p = pending(); const u = unknownCount();
     if (p) return `${p} edited food${p > 1 ? 's need' : ' needs'} recalculating before you can log.`;

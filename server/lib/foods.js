@@ -1,7 +1,11 @@
 /**
- * A small built-in food table (per 100 g or 100 ml, approximate values based on
- * common IFCT/USDA figures). It is used when an AI key is missing or the AI call
- * fails, and to give pantry items nutrition data without spending AI quota.
+ * Built-in food table, per 100 g (or per 100 ml for liquids). Values follow common IFCT (Indian) and
+ * USDA figures. Each entry has a `source`:
+ *   - 'usda-checked': compared with USDA FoodData Central (SR Legacy) and found within a few percent.
+ *   - 'reference':    typical published values entered by hand; reasonable, but not individually verified.
+ *   - 'calculated':   cooked dishes computed from ingredient quantities (see addRecipe below).
+ * It is used when an AI key is missing or the AI call fails, to price cooking fat and ingredient
+ * changes exactly, and to give pantry items nutrition data without spending AI quota.
  */
 
 const FOODS = [];
@@ -11,6 +15,9 @@ function add(name, aliases, kcal, protein, carbs, fat, fiber, opts = {}) {
     aliases: [name, ...aliases],
     kcal, protein, carbs, fat, fiber,
     gpp: opts.gpp || null,        // grams per piece
+    spoon: opts.spoon || null,    // [grams per tsp, grams per tbsp] when it differs from 5 / 15
+    katori: opts.katori || null,  // grams per katori (small serving bowl)
+    source: opts.source || 'reference',
     twin: opts.twin || null,      // cooked / ready version used when logging meals
     unit: opts.unit || 'g',
     ready: Boolean(opts.ready)    // already cooked or ready to eat
@@ -18,35 +25,30 @@ function add(name, aliases, kcal, protein, carbs, fat, fiber, opts = {}) {
 }
 
 // Grains and flours
-add('rice', ['white rice', 'basmati rice', 'basmati', 'chawal', 'raw rice'], 360, 6.8, 79, 0.6, 1.3, { twin: 'cooked rice' });
+add('rice', ['white rice', 'basmati rice', 'basmati', 'chawal', 'raw rice'], 360, 6.8, 79, 0.6, 1.3, { twin: 'cooked rice', source: 'usda-checked' });
 add('brown rice', ['brown basmati'], 362, 7.5, 76, 2.7, 3.5, { twin: 'cooked brown rice' });
-add('cooked rice', ['steamed rice', 'boiled rice', 'plain rice', 'jeera rice', 'rice cooked'], 130, 2.7, 28, 0.3, 0.4, { ready: true });
+add('cooked rice', ['steamed rice', 'boiled rice', 'plain rice', 'rice cooked'], 130, 2.7, 28, 0.3, 0.4, { ready: true, source: 'usda-checked' });
 add('cooked brown rice', ['brown rice cooked'], 123, 2.7, 26, 1, 1.8, { ready: true });
-add('atta', ['wheat flour', 'whole wheat flour', 'gehu atta'], 340, 12, 72, 1.7, 11, { twin: 'roti' });
-add('maida', ['refined flour', 'all purpose flour'], 364, 10, 76, 1, 2.7);
-add('roti', ['chapati', 'phulka', 'fulka', 'chapatti'], 297, 9.8, 46, 7.5, 4.9, { gpp: 40, ready: true });
-add('paratha', ['aloo paratha', 'plain paratha'], 326, 7.5, 45, 13, 3, { gpp: 70, ready: true });
+add('atta', ['wheat flour', 'whole wheat flour', 'gehu atta'], 340, 12, 72, 1.7, 11, { twin: 'roti', source: 'usda-checked' });
+add('maida', ['refined flour', 'all purpose flour'], 364, 10, 76, 1, 2.7, { source: 'usda-checked' });
 add('bread', ['whole wheat bread', 'brown bread', 'white bread', 'toast', 'bread slice', 'bread slices'], 250, 10, 45, 3.5, 5, { gpp: 30, ready: true });
-add('rolled oats', ['oats', 'oatmeal', 'quick oats', 'steel cut oats'], 389, 13, 66, 7, 10, { twin: 'oats porridge' });
+add('rolled oats', ['oats', 'oatmeal', 'quick oats', 'steel cut oats'], 389, 13, 66, 7, 10, { twin: 'oats porridge', source: 'usda-checked' });
 add('oats porridge', ['porridge', 'cooked oats', 'oats with milk', 'overnight oats'], 71, 3.4, 12, 1.5, 1.4, { ready: true });
 add('suji', ['semolina', 'rava', 'sooji'], 360, 10, 73, 1, 3, { twin: 'upma' });
-add('upma', ['rava upma', 'suji upma'], 135, 3, 21, 4.5, 2, { ready: true });
 add('poha', ['flattened rice', 'beaten rice', 'poha raw'], 350, 6.6, 77, 1.2, 2, { twin: 'cooked poha' });
-add('cooked poha', ['vegetable poha', 'kanda poha', 'poha cooked'], 130, 2.6, 25, 2.5, 1.5, { ready: true });
 add('quinoa', [], 368, 14, 64, 6, 7, { twin: 'cooked quinoa' });
 add('cooked quinoa', ['quinoa cooked'], 120, 4.4, 21, 1.9, 2.8, { ready: true });
 add('pasta', ['spaghetti', 'macaroni', 'penne', 'noodles'], 371, 13, 75, 1.5, 3.2, { twin: 'cooked pasta' });
 add('cooked pasta', ['pasta cooked', 'boiled pasta', 'boiled noodles'], 158, 5.8, 31, 0.9, 1.8, { ready: true });
-add('besan', ['gram flour', 'chickpea flour'], 387, 22, 58, 6.7, 11, { twin: 'besan chilla' });
+add('besan', ['gram flour', 'chickpea flour'], 387, 22, 58, 6.7, 11, { twin: 'besan chilla', source: 'usda-checked' });
 add('besan chilla', ['chilla', 'cheela', 'besan cheela', 'moong chilla', 'moong dal chilla'], 190, 10, 22, 6.5, 4.5, { gpp: 80, ready: true });
 
 // Lentils and legumes
-add('toor dal', ['arhar dal', 'tur dal', 'pigeon pea', 'toor', 'arhar'], 335, 22, 58, 1.5, 15, { twin: 'dal cooked' });
-add('moong dal', ['mung dal', 'green gram', 'moong', 'yellow moong dal', 'split moong'], 347, 24, 59, 1.2, 16, { twin: 'dal cooked' });
-add('masoor dal', ['red lentil', 'red lentils', 'masoor'], 343, 25, 59, 1, 11, { twin: 'dal cooked' });
+add('toor dal', ['arhar dal', 'tur dal', 'pigeon pea', 'toor', 'arhar'], 335, 22, 58, 1.5, 15, { twin: 'dal cooked', source: 'usda-checked' });
+add('moong dal', ['mung dal', 'green gram', 'moong', 'yellow moong dal', 'split moong'], 347, 24, 59, 1.2, 16, { twin: 'dal cooked', source: 'usda-checked' });
+add('masoor dal', ['red lentil', 'red lentils', 'masoor'], 343, 25, 59, 1, 11, { twin: 'dal cooked', source: 'usda-checked' });
 add('chana dal', ['split chickpea', 'bengal gram dal'], 360, 21, 60, 5.6, 12, { twin: 'dal cooked' });
 add('urad dal', ['black gram', 'urad'], 341, 25, 59, 1.6, 18, { twin: 'dal cooked' });
-add('dal cooked', ['dal', 'daal', 'dal tadka', 'tadka dal', 'cooked dal', 'lentil soup', 'dal fry', 'sambar dal'], 116, 6.8, 19, 1.6, 4, { ready: true });
 add('chickpeas', ['kabuli chana', 'chana', 'garbanzo', 'white chickpeas', 'kala chana', 'black chickpeas'], 364, 19, 61, 6, 17, { twin: 'chole cooked' });
 add('roasted chana', ['roasted chickpeas', 'bhuna chana'], 364, 19, 61, 6, 17, { ready: true });
 add('chole cooked', ['chole', 'chana masala', 'chickpea curry', 'cooked chickpeas', 'boiled chickpeas', 'chole masala'], 164, 8.9, 27, 2.6, 7.6, { ready: true });
@@ -56,22 +58,16 @@ add('soya chunks', ['soy chunks', 'nutrela', 'soya nuggets', 'meal maker'], 345,
 add('tofu', [], 76, 8, 1.9, 4.8, 0.3);
 
 // Prepared dishes
-add('idli', ['idly'], 156, 4.5, 32, 0.4, 1.5, { gpp: 40, ready: true });
-add('dosa', ['plain dosa', 'masala dosa'], 168, 3.9, 29, 3.7, 1, { gpp: 80, ready: true });
 add('sambar', [], 55, 2.8, 8, 1.4, 2, { ready: true });
 add('curd rice', ['thayir sadam', 'dahi rice'], 118, 3.2, 19, 3, 0.3, { ready: true });
-add('khichdi', ['dal khichdi', 'moong khichdi', 'khichri'], 120, 4.5, 20, 2.5, 2.5, { ready: true });
-add('pulao', ['veg pulao', 'vegetable pulao', 'pulav'], 140, 3, 24, 3.5, 1.5, { ready: true });
 add('biryani', ['veg biryani', 'vegetable biryani'], 170, 4, 26, 5.5, 1.5, { ready: true });
 add('chicken biryani', [], 180, 9, 22, 6, 1, { ready: true });
 add('samosa', [], 262, 4, 24, 17, 2, { gpp: 60, ready: true });
-add('mixed vegetables', ['mixed veg', 'sabzi', 'vegetable curry', 'veg curry', 'sabji'], 70, 2.2, 9, 3, 2.5, { ready: true });
 add('salad', ['green salad', 'kachumber', 'vegetable salad'], 20, 1, 4, 0.2, 1.5, { ready: true });
 add('chai', ['tea', 'masala chai', 'milk tea'], 50, 1.5, 7, 1.8, 0, { unit: 'ml', ready: true });
 
 // Dairy and eggs
 add('paneer', ['cottage cheese', 'indian cottage cheese'], 296, 18, 3.4, 23, 0);
-add('paneer bhurji', ['bhurji paneer'], 250, 14, 6, 19, 1.5, { ready: true });
 add('palak paneer', [], 160, 8, 6, 12, 2, { ready: true });
 add('paneer tikka', [], 220, 14, 5, 16, 1, { ready: true });
 add('milk', ['whole milk', 'toned milk', 'full cream milk', 'cow milk', 'doodh'], 62, 3.3, 4.8, 3.3, 0, { unit: 'ml' });
@@ -83,8 +79,8 @@ add('green tea', ['green tea', 'black tea', 'black coffee'], 1, 0, 0.2, 0, 0, { 
 add('curd', ['yogurt', 'yoghurt', 'dahi', 'plain yogurt'], 61, 3.5, 4.7, 3.3, 0);
 add('greek yogurt', ['hung curd', 'greek yoghurt'], 59, 10, 3.6, 0.4, 0);
 add('buttermilk', ['chaas', 'chhaas'], 40, 3.3, 4.8, 0.9, 0, { unit: 'ml' });
-add('ghee', ['clarified butter'], 900, 0, 0, 100, 0);
-add('butter', [], 717, 0.9, 0.1, 81, 0);
+add('ghee', ['clarified butter'], 900, 0, 0, 100, 0, { spoon: [4.5, 13.5] });
+add('butter', [], 717, 0.9, 0.1, 81, 0, { spoon: [4.7, 14.2] });
 add('cheese', ['cheddar', 'cheese slice', 'mozzarella', 'processed cheese'], 350, 25, 1.3, 27, 0);
 add('egg', ['eggs', 'boiled egg', 'boiled eggs', 'omelette', 'omelet', 'scrambled eggs', 'fried egg', 'egg bhurji', 'anda'], 143, 12.6, 0.7, 9.5, 0, { gpp: 50, ready: true });
 add('egg white', ['egg whites'], 52, 11, 0.7, 0.2, 0, { gpp: 33, ready: true });
@@ -135,13 +131,113 @@ add('fish', ['rohu', 'salmon', 'tuna', 'basa', 'pomfret', 'fish fry', 'fish curr
 add('prawns', ['shrimp', 'prawn'], 99, 24, 0.2, 0.3, 0);
 
 // Fats, sugars and other
-add('cooking oil', ['oil', 'sunflower oil', 'mustard oil', 'olive oil', 'coconut oil', 'groundnut oil', 'refined oil'], 884, 0, 0, 100, 0, { unit: 'ml' });
-add('sugar', ['cheeni', 'white sugar'], 387, 0, 100, 0, 0);
+add('cooking oil', ['oil', 'sunflower oil', 'mustard oil', 'olive oil', 'coconut oil', 'groundnut oil', 'refined oil'], 813, 0, 0, 92, 0, { unit: 'ml' }); // per 100 ml: oil weighs 0.92 g/ml (884 kcal per 100 g)
+add('sugar', ['cheeni', 'white sugar'], 387, 0, 100, 0, 0, { spoon: [4.2, 12.5] });
 add('jaggery', ['gur'], 383, 0.4, 98, 0.1, 0);
-add('honey', [], 304, 0.3, 82, 0, 0.2);
+add('honey', [], 304, 0.3, 82, 0, 0.2, { spoon: [7, 21] });
 add('coconut', ['fresh coconut', 'dry coconut'], 354, 3.3, 15, 33, 9);
 add('biscuits', ['biscuit', 'cookies', 'cookie', 'marie biscuit'], 450, 6, 70, 16, 2, { gpp: 10, ready: true });
 add('protein powder', ['whey', 'whey protein', 'protein shake'], 400, 80, 8, 6, 0);
+
+
+// More Indian staples, street food and packaged foods (typical published values, source: reference)
+add('rice flour', ['chawal ka atta'], 366, 6, 80, 1.4, 2.4);
+add('jowar flour', ['jowar', 'sorghum flour', 'jwari atta'], 349, 10.4, 72.6, 1.9, 9.7, { twin: 'jowar roti' });
+add('bajra flour', ['bajra', 'pearl millet flour', 'bajre ka atta'], 361, 11.6, 67.5, 5, 11.3, { twin: 'bajra roti' });
+add('ragi flour', ['ragi', 'finger millet flour', 'nachni'], 328, 7.3, 72, 1.3, 11.5, { twin: 'ragi roti' });
+add('makhana', ['fox nuts', 'phool makhana', 'lotus seeds'], 347, 9.7, 77, 0.1, 14.5);
+add('murmura', ['puffed rice', 'muri', 'mamra'], 402, 7.5, 89, 0.5, 2);
+add('sweet potato', ['shakarkandi'], 86, 1.6, 20, 0.1, 3, { gpp: 130 });
+add('beetroot', ['beet', 'chukandar'], 43, 1.6, 10, 0.2, 2.8, { gpp: 100 });
+add('pumpkin', ['kaddu'], 26, 1, 6.5, 0.1, 0.5);
+add('bottle gourd', ['lauki', 'doodhi', 'dudhi'], 14, 0.6, 3.4, 0, 0.5);
+add('coconut water', ['nariyal pani', 'tender coconut water'], 19, 0.7, 3.7, 0.2, 1.1, { unit: 'ml', ready: true });
+add('hummus', [], 166, 7.9, 14.3, 9.6, 6, { ready: true });
+add('cornflakes', ['corn flakes'], 357, 7.5, 84, 0.4, 3.3, { ready: true });
+add('muesli', [], 340, 10, 66, 5, 8, { ready: true });
+add('dhokla', ['khaman dhokla'], 160, 6.5, 24, 4.5, 2, { gpp: 40, ready: true });
+add('vada pav', ['wada pav'], 200, 5, 28, 8.5, 2, { gpp: 150, ready: true });
+add('french fries', ['fries', 'chips fries'], 312, 3.4, 41, 15, 3.8, { ready: true });
+add('pizza', ['pizza slice', 'cheese pizza'], 266, 11, 33, 10, 2.3, { gpp: 100, ready: true });
+add('rasgulla', ['rosogolla'], 186, 4, 40, 1, 0, { gpp: 50, ready: true });
+add('gulab jamun', ['gulabjamun'], 350, 4.5, 52, 14, 0.5, { gpp: 40, ready: true });
+add('kheer', ['rice kheer', 'payasam'], 130, 3.2, 19, 4.2, 0.2, { ready: true });
+add('sweet lassi', ['lassi'], 85, 2.6, 13, 2.2, 0, { unit: 'ml', ready: true });
+add('egg curry', ['anda curry'], 140, 8, 5, 10, 1, { ready: true });
+add('mutton curry', ['mutton masala', 'lamb curry', 'gosht'], 175, 14, 4, 11, 1, { ready: true });
+add('fish curry', [], 110, 12, 3, 5, 0.8, { ready: true });
+add('chicken tikka', ['tandoori chicken'], 150, 25, 3, 4, 0.5, { ready: true });
+add('peanut chikki', ['chikki', 'groundnut chikki'], 480, 14, 60, 22, 4, { gpp: 30, ready: true });
+add('namkeen', ['bhujia', 'sev', 'mixture'], 520, 14, 45, 32, 6, { ready: true });
+add('potato chips', ['chips', 'wafers', 'crisps'], 536, 7, 53, 34, 4.8, { ready: true });
+add('cola', ['soft drink', 'soda', 'coke', 'pepsi'], 42, 0, 10.6, 0, 0, { unit: 'ml', ready: true });
+add('fruit juice', ['orange juice', 'packaged juice', 'mango juice'], 48, 0.6, 11.5, 0.2, 0.2, { unit: 'ml', ready: true });
+add('sugarcane juice', ['ganne ka ras'], 55, 0, 14, 0, 0, { unit: 'ml', ready: true });
+
+/* ------------------------------ Recipes: dishes calculated from ingredients ------------------------------ */
+
+// Nutrition of cooking fat per gram of fat or oil.
+export const FAT_SOURCES = {
+  oil: { kcal: 8.84, protein: 0, carbs: 0, fat: 1, perTsp: 4.6, label: 'oil' },
+  ghee: { kcal: 9.0, protein: 0, carbs: 0, fat: 1, perTsp: 4.5, label: 'ghee' },
+  butter: { kcal: 7.17, protein: 0.009, carbs: 0.001, fat: 0.81, perTsp: 4.7, label: 'butter' }
+};
+
+const ZERO = () => ({ kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 });
+const addVec = (a, b, k = 1) => ({ kcal: a.kcal + b.kcal * k, protein: a.protein + b.protein * k, carbs: a.carbs + b.carbs * k, fat: a.fat + b.fat * k, fiber: a.fiber + (b.fiber || 0) * k });
+const foodByName = (name) => FOODS.find((f) => f.name === name);
+const grams = (food, g) => { const k = g / 100; return { kcal: food.kcal * k, protein: food.protein * k, carbs: food.carbs * k, fat: food.fat * k, fiber: food.fiber * k }; };
+const fatVec = (type, g) => { const f = FAT_SOURCES[type]; return { kcal: f.kcal * g, protein: f.protein * g, carbs: f.carbs * g, fat: f.fat * g, fiber: 0 }; };
+
+/**
+ * Computes the nutrition of a recipe per 100 g of the finished dish.
+ * spec: { ingredients: [[foodName, rawGrams], ...], fat: [type, grams] | null, yield: grams of finished dish, flour?: name of the flour ingredient }
+ * overrides: { fat: [type, gramsForWholeYield] | null, flours: [{ food, share }] }
+ */
+export function composeRecipe(spec, overrides = {}) {
+  let total = ZERO();
+  for (const [name, g] of spec.ingredients) {
+    if (overrides.flours && name === spec.flour) {
+      for (const { food, share } of overrides.flours) total = addVec(total, grams(food, g * share));
+    } else {
+      const food = foodByName(name);
+      if (!food) throw new Error(`Recipe ingredient missing from the food table: ${name}`);
+      total = addVec(total, grams(food, g));
+    }
+  }
+  const fat = overrides.fat !== undefined ? overrides.fat : spec.fat;
+  if (fat) total = addVec(total, fatVec(fat[0], fat[1]));
+  const k = 100 / spec.yield;
+  return { kcal: total.kcal * k, protein: total.protein * k, carbs: total.carbs * k, fat: total.fat * k, fiber: total.fiber * k };
+}
+
+function addRecipe(name, aliases, spec, opts = {}) {
+  const v = composeRecipe(spec);
+  const r1 = (x) => Math.round(x * 10) / 10;
+  add(name, aliases, Math.round(v.kcal), r1(v.protein), r1(v.carbs), r1(v.fat), r1(v.fiber), { ...opts, ready: true, source: 'calculated' });
+  FOODS[FOODS.length - 1].recipe = spec;
+}
+
+// Quantities are for one typical serving or piece; "yield" is the weight of the finished dish.
+addRecipe('roti', ['chapati', 'phulka', 'fulka', 'chapatti'], { ingredients: [['atta', 30]], fat: ['ghee', 1.5], yield: 40, flour: 'atta' }, { gpp: 40 });
+addRecipe('jowar roti', ['jowar bhakri', 'jwari roti'], { ingredients: [['jowar flour', 30]], fat: null, yield: 40, flour: 'jowar flour' }, { gpp: 40 });
+addRecipe('bajra roti', ['bajra bhakri'], { ingredients: [['bajra flour', 35]], fat: null, yield: 50, flour: 'bajra flour' }, { gpp: 50 });
+addRecipe('ragi roti', ['ragi mudde', 'nachni roti'], { ingredients: [['ragi flour', 30]], fat: null, yield: 45, flour: 'ragi flour' }, { gpp: 45 });
+addRecipe('paratha', ['plain paratha'], { ingredients: [['atta', 45]], fat: ['oil', 5], yield: 65, flour: 'atta' }, { gpp: 65 });
+addRecipe('aloo paratha', ['stuffed paratha'], { ingredients: [['atta', 40], ['potato', 40]], fat: ['oil', 6], yield: 90, flour: 'atta' }, { gpp: 90 });
+addRecipe('puri', ['poori'], { ingredients: [['atta', 25]], fat: ['oil', 4.5], yield: 35, flour: 'atta' }, { gpp: 35 });
+addRecipe('dosa', ['plain dosa', 'masala dosa'], { ingredients: [['rice', 22], ['urad dal', 7]], fat: ['oil', 3], yield: 80 }, { gpp: 80 });
+addRecipe('idli', ['idly'], { ingredients: [['rice', 13], ['urad dal', 4.5]], fat: null, yield: 40 }, { gpp: 40 });
+addRecipe('cooked poha', ['vegetable poha', 'kanda poha', 'poha cooked'], { ingredients: [['poha', 40], ['onion', 25], ['potato', 20], ['peanuts', 5]], fat: ['oil', 5], yield: 170 });
+addRecipe('upma', ['rava upma', 'suji upma'], { ingredients: [['suji', 50], ['onion', 20], ['carrot', 20]], fat: ['oil', 6], yield: 200 });
+addRecipe('dal cooked', ['dal', 'daal', 'dal tadka', 'tadka dal', 'cooked dal', 'lentil soup', 'dal fry', 'sambar dal'], { ingredients: [['toor dal', 35], ['onion', 15], ['tomato', 25]], fat: ['ghee', 5], yield: 180 }, { katori: 150 });
+addRecipe('mixed vegetables', ['mixed veg', 'sabzi', 'vegetable curry', 'veg curry', 'sabji'], { ingredients: [['potato', 40], ['cauliflower', 60], ['green peas', 30], ['onion', 20], ['tomato', 30]], fat: ['oil', 6], yield: 170 }, { katori: 120 });
+addRecipe('paneer bhurji', ['bhurji paneer'], { ingredients: [['paneer', 80], ['onion', 25], ['tomato', 30]], fat: ['oil', 5], yield: 140 });
+addRecipe('egg bhurji', ['anda bhurji'], { ingredients: [['egg', 100], ['onion', 20]], fat: ['oil', 5], yield: 115 });
+addRecipe('khichdi', ['dal khichdi', 'moong khichdi', 'khichri'], { ingredients: [['rice', 25], ['moong dal', 25], ['carrot', 20]], fat: ['ghee', 4.5], yield: 250 });
+addRecipe('pulao', ['veg pulao', 'vegetable pulao', 'pulav'], { ingredients: [['rice', 55], ['green peas', 25], ['carrot', 15], ['onion', 15]], fat: ['oil', 5], yield: 220 });
+addRecipe('jeera rice', [], { ingredients: [['rice', 36]], fat: ['ghee', 3], yield: 100 });
+addRecipe('pakora', ['pakoda', 'bhajiya', 'onion pakora', 'bhaji'], { ingredients: [['besan', 10], ['onion', 10]], fat: ['oil', 3.5], yield: 25 }, { gpp: 25 });
 
 export const FOOD_TABLE = FOODS;
 
@@ -172,8 +268,6 @@ export function findFood(text, context = 'pantry') {
 
 /* ------------------------------ Quantities ------------------------------ */
 
-const UNIT_G = { g: 1, gm: 1, gms: 1, gram: 1, grams: 1, kg: 1000, ml: 1, l: 1000, litre: 1000, litres: 1000, liter: 1000, liters: 1000, tbsp: 15, tsp: 5, glass: 250, glasses: 250 };
-
 function simplifyFractions(text) {
   const half = { '½': 0.5, '¼': 0.25, '¾': 0.75 };
   return String(text || '')
@@ -185,23 +279,51 @@ function simplifyFractions(text) {
     .replace(/\b(?:a|an|one)\s+(?=(?:cups?|bowls?|glass(?:es)?|tbsp|tsp)\b)/gi, '1 ');
 }
 
+const UNIT_G = { g: 1, gm: 1, gms: 1, gram: 1, grams: 1, kg: 1000, ml: 1, l: 1000, litre: 1000, litres: 1000, liter: 1000, liters: 1000, glass: 250, glasses: 250 };
+const UNITS = 'kg|gms?|grams?|g|ml|litres?|liters?|l|cups?|tbsp|tablespoons?|tsp|teaspoons?|katoris?|bowls?|glass(?:es)?|pieces?|pcs?|slices?|nos?';
+const QTY_RE = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${UNITS})?\\b`, 'i');
+
+/**
+ * Grams (or ml) of `food` described by free text such as "2 rotis", "1 katori dal", "2 tsp ghee" or "150 g paneer".
+ * `assumed` is true when the amount is a typical-portion guess rather than something the text states.
+ * `basis` explains the conversion in plain words.
+ */
 export function estimateGrams(rawText, food) {
   const text = simplifyFractions(rawText);
-  const m = /(\d+(?:\.\d+)?)\s*(kg|gms?|grams?|g|ml|litres?|liters?|l|cups?|tbsp|tsp|bowls?|glass(?:es)?|pieces?|pcs?|slices?|nos?)?\b/i.exec(String(text || ''));
+  const m = QTY_RE.exec(String(text || ''));
   const cooked = !food || food.ready || food.unit === 'ml';
   const piece = food?.gpp || 100;
   if (!m) {
     const word = /\b(a|an|one|two|three|half)\b/i.exec(text || '');
     const n = word ? { a: 1, an: 1, one: 1, two: 2, three: 3, half: 0.5 }[word[1].toLowerCase()] : 1;
-    return { grams: Math.round((food?.gpp ? piece : cooked ? 150 : 100) * n), assumed: true };
+    const g = Math.round((food?.gpp ? piece : cooked ? 150 : 100) * n);
+    return { grams: g, assumed: true, basis: `typical portion assumed (${g} ${food?.unit === 'ml' ? 'ml' : 'g'})` };
   }
   const n = Math.min(parseFloat(m[1]), 5000); // ignore absurd quantities
-  const unit = (m[2] || '').toLowerCase();
-  if (!unit) return food?.gpp ? { grams: Math.round(n * piece), assumed: false } : { grams: Math.round(n * (cooked ? 150 : 100)), assumed: true };
-  if (UNIT_G[unit]) return { grams: Math.round(n * UNIT_G[unit]), assumed: false };
-  if (unit.startsWith('cup')) return { grams: Math.round(n * (food?.unit === 'ml' ? 240 : cooked ? 180 : 150)), assumed: true };
-  if (unit.startsWith('bowl')) return { grams: Math.round(n * 250), assumed: true };
-  return { grams: Math.round(n * piece), assumed: !food?.gpp }; // pieces, slices
+  let unit = (m[2] || '').toLowerCase();
+  if (unit.startsWith('teaspoon')) unit = 'tsp';
+  if (unit.startsWith('tablespoon')) unit = 'tbsp';
+  if (unit.startsWith('katori')) unit = 'katori';
+  if (!unit) {
+    return food?.gpp
+      ? { grams: Math.round(n * piece), assumed: false, basis: `${n} piece${n === 1 ? '' : 's'} x ${piece} g` }
+      : { grams: Math.round(n * (cooked ? 150 : 100)), assumed: true, basis: `typical portion assumed (${cooked ? 150 : 100} g each)` };
+  }
+  if (unit === 'tsp' || unit === 'tbsp') {
+    const per = (food?.spoon || [5, 15])[unit === 'tsp' ? 0 : 1];
+    return { grams: Math.round(n * per * 10) / 10, assumed: false, basis: `1 ${unit} = ${per} g` };
+  }
+  if (unit === 'katori') {
+    const per = food?.katori || (cooked ? 150 : 120);
+    return { grams: Math.round(n * per), assumed: true, basis: `1 katori = about ${per} g` };
+  }
+  if (UNIT_G[unit]) return { grams: Math.round(n * UNIT_G[unit]), assumed: false, basis: `${n} ${unit} = ${Math.round(n * UNIT_G[unit])} g` };
+  if (unit.startsWith('cup')) {
+    const per = food?.unit === 'ml' ? 240 : cooked ? 180 : 150;
+    return { grams: Math.round(n * per), assumed: true, basis: `1 cup = about ${per} g` };
+  }
+  if (unit.startsWith('bowl')) return { grams: Math.round(n * 250), assumed: true, basis: '1 bowl = about 250 g' };
+  return { grams: Math.round(n * piece), assumed: !food?.gpp, basis: `${n} piece${n === 1 ? '' : 's'} x ${piece} g` }; // pieces, slices
 }
 
 export function nutritionFor(food, grams) {
