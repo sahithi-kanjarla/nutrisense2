@@ -2,7 +2,7 @@ import { q, tx } from '../lib/db.js';
 import { HttpError, bad, num, oneOf, rateLimit, str } from '../lib/http.js';
 import { dateOr } from '../lib/dates.js';
 import { dayTotals, getPantry, getProfile, matchPantry } from '../lib/data.js';
-import { analyzeMeal, analyzePhoto } from '../lib/ai/features.js';
+import { analyzeMeal, analyzePhoto, estimateItems } from '../lib/ai/features.js';
 import { findFood, estimateGrams } from '../lib/foods.js';
 
 export const MEAL_TYPES = ['breakfast', 'lunch', 'snack', 'dinner'];
@@ -22,6 +22,44 @@ function deductionFor(entry, pantry) {
   if (amount <= 0) return null;
   amount = Math.min(amount, item.quantity);
   return { item_id: item.id, name: item.name, amount, unit: item.unit };
+}
+
+const clip = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+
+/** Validates an optional photo from the request body. Returns { mime, data } or null. */
+function readImage(body) {
+  if (!body.image) return null;
+  const mime = String(body.mime || '');
+  const data = String(body.image).replace(/^data:[^,]+,/, '');
+  if (!MIME.includes(mime)) throw bad('Please use a JPEG, PNG or WebP photo.');
+  if (!data || data.length > 5_000_000) throw bad('That photo is too large. Please try a smaller one.');
+  if (!/^[A-Za-z0-9+/=]+$/.test(data)) throw bad('That photo could not be read.');
+  return { mime, data };
+}
+
+/** Foods the user typed or edited: name, quantity and cooking note only. */
+function readFoods(list, field = 'Foods') {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list) || list.length > 12) throw bad(`${field} must be a list of at most 12 foods.`);
+  return list.map((f) => ({ name: clip(f?.name, 80), quantity: clip(f?.quantity, 60), cooking: clip(f?.cooking, 120) })).filter((f) => f.name);
+}
+
+/** Answers to the AI's follow-up questions (at most 3). */
+function readAnswers(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 3).map((a) => ({ question: clip(a?.question, 140), answer: clip(a?.answer, 120) })).filter((a) => a.answer);
+}
+
+/** Pantry stock the logged foods probably used up. `food` says which row each suggestion belongs to. */
+function pantryMatchesFor(items, userId, today) {
+  const pantry = getPantry(userId, today).filter((i) => i.status !== 'expired');
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    const d = deductionFor(it, pantry);
+    if (d && !seen.has(d.item_id)) { seen.add(d.item_id); out.push({ ...d, food: it.name }); }
+  }
+  return out;
 }
 
 export function register(router) {
@@ -73,30 +111,35 @@ export function register(router) {
     return { ok: true, totals: dayTotals(ctx.user.id, row.date) };
   });
 
+  // Analyses text, a photo, or both. Nothing is saved: the user reviews and edits, then logs with POST /api/meals.
   router.add('POST', '/api/meals/analyze', async (ctx) => {
     rateLimit(`ai:${ctx.user.id}`, 30, 60_000);
-    const text = str(ctx.body.text, { min: 2, max: 400, field: 'Meal description' });
+    const text = str(ctx.body.text, { max: 400, field: 'Meal description' });
+    const image = readImage(ctx.body);
+    if (text.length < 2 && !image) throw bad('Describe your meal or add a photo.');
     const today = dateOr(ctx.body.today);
-    const profile = getProfile(ctx.user.id);
-    const result = await analyzeMeal(text, profile);
-    const pantry = getPantry(ctx.user.id, today).filter((i) => i.status !== 'expired');
-    const seen = new Set();
-    const pantry_matches = [];
-    for (const it of result.items) {
-      const d = deductionFor(it, pantry);
-      if (d && !seen.has(d.item_id)) { seen.add(d.item_id); pantry_matches.push(d); }
-    }
-    return { ...result, pantry_matches };
-  }, { maxBody: 20_000 });
+    const result = await analyzeMeal(text, getProfile(ctx.user.id), {
+      image, answers: readAnswers(ctx.body.answers), confirmed: readFoods(ctx.body.confirmed, 'Confirmed foods')
+    });
+    return { ...result, pantry_matches: pantryMatchesFor(result.items, ctx.user.id, today) };
+  }, { maxBody: 7_000_000 });
 
+  // Recalculates only the foods the user edited or added (the review screen's Recalculate button).
+  router.add('POST', '/api/meals/estimate-items', async (ctx) => {
+    rateLimit(`ai:${ctx.user.id}`, 30, 60_000);
+    const foods = readFoods(ctx.body.items, 'Items');
+    if (!foods.length) throw bad('Add at least one food to recalculate.');
+    const today = dateOr(ctx.body.today);
+    const result = await estimateItems(foods, getProfile(ctx.user.id));
+    return { ...result, pantry_matches: pantryMatchesFor(result.items.filter((i) => !i.unknown), ctx.user.id, today) };
+  }, { maxBody: 30_000 });
+
+  // The original photo-only route, kept so older clients keep working.
   router.add('POST', '/api/meals/analyze-photo', async (ctx) => {
     rateLimit(`ai:${ctx.user.id}`, 30, 60_000);
-    const mime = String(ctx.body.mime || '');
-    const data = String(ctx.body.image || '').replace(/^data:[^,]+,/, '');
-    if (!MIME.includes(mime)) throw bad('Please use a JPEG, PNG or WebP photo.');
-    if (!data || data.length > 5_000_000) throw bad('That photo is too large. Please try a smaller one.');
-    if (!/^[A-Za-z0-9+/=]+$/.test(data)) throw bad('That photo could not be read.');
-    const result = await analyzePhoto({ mime, data }, getProfile(ctx.user.id));
+    const image = readImage(ctx.body);
+    if (!image) throw bad('Please use a JPEG, PNG or WebP photo.');
+    const result = await analyzePhoto(image, getProfile(ctx.user.id));
     return { ...result, pantry_matches: [] };
   }, { maxBody: 7_000_000 });
 }

@@ -381,3 +381,105 @@ test('demo guest account comes with sample data', async () => {
   assert.equal(dash.status, 200);
   assert.ok(dash.totals.kcal > 0 && dash.pantry_count > 5);
 });
+
+/* ------------------------------ Meal review (text + photo + editing) ------------------------------ */
+
+const PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+test('meal review: text and photo together keep labels, limit questions and save nothing', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  const before = await api('GET', `/meals?date=${TODAY}`, undefined, d.token);
+  geminiReply = () => ({
+    json: {
+      items: [
+        { name: 'Chapati', quantity: '2 pieces', cooking: 'oats and wheat flour, very little oil', origin: 'user', confidence: 'high', kcal: 180, protein: 6, carbs: 30, fat: 4, fiber: 4 },
+        { name: 'Curry', quantity: '1 katori', origin: 'photo', confidence: 'medium', kcal: 150, protein: 4, carbs: 12, fat: 9, fiber: 3 },
+        { name: 'Oil used', quantity: '1 tsp', origin: 'invented', confidence: 'nonsense', kcal: 40, protein: 0, carbs: 0, fat: 4.5, fiber: 0 }
+      ],
+      questions: [1, 2, 3, 4, 5].map((n) => ({ text: `Question ${n}?`, options: ['a', 'b', 'c', 'd', 'e', 'f'] })),
+      notes: 'Oil is assumed.'
+    }
+  });
+  const r = await api('POST', '/meals/analyze', { text: 'chapati with oats flour and wheat flour, very little oil', image: `data:image/png;base64,${PIXEL}`, mime: 'image/png', today: TODAY }, d.token);
+  assert.equal(r.status, 200, JSON.stringify(r));
+  assert.equal(r.source, 'photo');
+  assert.equal(r.items[0].origin, 'user');
+  assert.equal(r.items[1].origin, 'photo');
+  assert.equal(r.items[2].origin, 'assumed', 'unknown origin values become assumed');
+  assert.equal(r.items[2].confidence, 'medium');
+  assert.equal(r.questions.length, 3, 'at most three follow-up questions');
+  assert.ok(r.questions.every((x) => x.options.length <= 4));
+  assert.ok(r.warnings.some((w) => w.includes('photo cannot show hidden ingredients')), 'allergy note for photos');
+  const sent = JSON.stringify(calls.gemini[0]);
+  assert.ok(sent.includes('inline_data'), 'the photo was sent to Gemini');
+  assert.ok(sent.includes('chapati with oats flour'), 'the text was sent too');
+  const after = await api('GET', `/meals?date=${TODAY}`, undefined, d.token);
+  assert.equal(after.meals.length, before.meals.length, 'analysing does not save a meal');
+});
+
+test('meal review: answers and confirmed foods reach the AI; input is validated', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  groqReply = () => ({ json: { items: [{ name: 'Dal', quantity: '1 katori', origin: 'user', confidence: 'high', kcal: 120, protein: 7, carbs: 19, fat: 2, fiber: 4 }], questions: [] } });
+  const ok = await api('POST', '/meals/analyze', {
+    text: 'dal', today: TODAY, answers: [{ question: 'How much ghee?', answer: '1 tsp' }], confirmed: [{ name: 'Dal', quantity: '1 katori', cooking: 'no tadka' }]
+  }, d.token);
+  assert.equal(ok.source, 'ai');
+  const prompt = JSON.stringify(calls.groq[0]);
+  assert.ok(prompt.includes('How much ghee?') && prompt.includes('no tadka'));
+  assert.equal((await api('POST', '/meals/analyze', { today: TODAY }, d.token)).status, 400, 'needs text or a photo');
+  assert.equal((await api('POST', '/meals/analyze', { text: 'x rice', image: PIXEL, mime: 'image/gif' }, d.token)).status, 400, 'bad image type');
+  assert.equal((await api('POST', '/meals/analyze', { text: 'x rice', confirmed: 'nope' }, d.token)).status, 400);
+});
+
+test('meal review: without AI, text still falls back to the food table with labels', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  const r = await api('POST', '/meals/analyze', { text: '2 rotis and 1 bowl dal', today: TODAY }, d.token);
+  assert.equal(r.source, 'local');
+  assert.ok(r.items.length >= 2 && r.items.every((i) => i.origin === 'user' && i.confidence));
+  assert.deepEqual(r.questions, []);
+});
+
+test('meal review: recalculating edited foods uses the table, AI for cooking notes, and flags unknown foods', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  // Plain food with a stated amount: table only, no AI call.
+  const t = await api('POST', '/meals/estimate-items', { items: [{ name: 'roti', quantity: '2 pieces' }], today: TODAY }, d.token);
+  assert.equal(calls.gemini.length + calls.groq.length, 0);
+  assert.equal(t.items[0].origin, 'user');
+  assert.equal(t.items[0].confidence, 'high');
+  assert.ok(t.items[0].kcal > 150 && t.items[0].kcal < 300);
+  assert.equal(t.totals.kcal, t.items[0].kcal);
+
+  // Cooking note: the AI sees it and the user's wording is kept.
+  groqReply = () => ({ json: { items: [{ name: 'x', quantity: '2 pieces', kcal: 200, protein: 7, carbs: 34, fat: 4, fiber: 5 }] } });
+  const c = await api('POST', '/meals/estimate-items', { items: [{ name: 'Chapati', quantity: '2 pieces', cooking: 'oats flour and wheat flour, very little oil' }], today: TODAY }, d.token);
+  assert.equal(c.items[0].name, 'Chapati');
+  assert.equal(c.items[0].cooking, 'oats flour and wheat flour, very little oil');
+  assert.equal(c.items[0].kcal, 200);
+  assert.ok(JSON.stringify(calls.groq[0]).includes('very little oil'));
+
+  // AI down: a cooking note on a known food falls back to the table and says so; a stranger food is unknown.
+  groqReply = () => ({ status: 503, body: { error: { message: 'down' } } });
+  geminiReply = () => ({ status: 503, body: { error: { message: 'down' } } });
+  const f = await api('POST', '/meals/estimate-items', { items: [{ name: 'roti', quantity: '2 pieces', cooking: 'with ghee' }, { name: 'zorblax', quantity: '1 cup' }], today: TODAY }, d.token);
+  assert.equal(f.items[0].cooking_ignored, true);
+  assert.ok(f.notes.includes('cooking notes'));
+  assert.equal(f.items[1].unknown, true);
+  assert.deepEqual(f.unknown, ['zorblax']);
+  assert.equal(f.totals.kcal, f.items[0].kcal, 'unknown foods are not counted as zero-calorie food');
+
+  assert.equal((await api('POST', '/meals/estimate-items', { items: [] }, d.token)).status, 400);
+});
+
+test('meal review: foods added or edited by the user are still checked against allergies', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  const r = await api('POST', '/meals/estimate-items', { items: [{ name: 'peanut chikki', quantity: '30 g' }], today: TODAY }, d.token);
+  assert.ok(r.warnings.some((w) => w.includes('Peanuts')));
+});
+
+test('meal review: the original photo route still works', async () => {
+  const d = await api('POST', '/auth/demo', { today: TODAY });
+  geminiReply = () => ({ json: { items: [{ name: 'Idli', quantity: '3 pieces', origin: 'photo', confidence: 'medium', kcal: 150, protein: 5, carbs: 30, fat: 1, fiber: 2 }] } });
+  const r = await api('POST', '/meals/analyze-photo', { image: PIXEL, mime: 'image/png' }, d.token);
+  assert.equal(r.source, 'photo');
+  assert.equal(r.items[0].name, 'Idli');
+});
