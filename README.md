@@ -30,6 +30,15 @@ The app works without keys: sign-up, pantry, meal logging (built-in food table o
 
 Safety is enforced in code, not only in prompts: AI recipes (title, ingredients, steps), weekly plans, chat replies, balancer suggestions and review text are checked against the user's allergies and diet. Unsafe recipes are retried once, then dropped, and unsafe prose is replaced with a safe message. The checks understand plurals and common Indian food names, but they are keyword based, so treat them as a strong safety net rather than a guarantee. Calorie targets use Mifflin-St Jeor with floors, no deficit for under-18s, low BMI or pregnancy.
 
+## How nutrition is calculated
+
+- **Daily targets** use the Mifflin-St Jeor equation with safety floors. No AI is involved.
+- **Foods in the built-in table** are calculated exactly: `amount in grams x values per 100 g`. Portion words are converted with food-specific weights (a teaspoon of ghee is 4.5 g, of sugar 4.2 g, a katori of dal about 150 g, a roti 40 g). Oil is stored per 100 ml (it weighs 0.92 g/ml).
+- **Cooked dishes** such as roti, dal, idli, dosa, poha, upma, khichdi and pulao are *calculated from ingredient quantities* (for example one 40 g roti = 30 g atta + 1.5 g ghee), not typed in as one number.
+- **Cooking notes** change the result: an explicit amount ("1 tsp ghee"), a level ("very little oil", "deep fried", "no oil") and a flour blend ("oats flour and wheat flour", "70% wheat 30% oats"). When proportions are not given, equal parts are assumed and the result says so. Other details in a note (spices, gravy base) are kept as text and do not change the calories; the result says that too.
+- **Foods the table does not know** are estimated by the AI. Its numbers are checked: calories above 9 kcal per gram are impossible and are lowered, nutrients that outweigh the food are scaled down, and an estimate far from the built-in table is flagged "Check" with the table's figure.
+- **Data sources.** Each table entry has a source: `usda-checked` (compared with USDA FoodData Central and within a few percent: rice, cooked rice, atta, oats, maida, besan, toor, moong and masoor dal), `calculated` (cooked dishes built from ingredients), or `reference` (typical IFCT or USDA values entered by hand, not individually verified). Treat everything as an estimate: real portions, brands and recipes vary by 10 to 25 percent.
+
 ## Meal logging and review
 
 Describe a meal, attach a photo, or do both. NutriSense lists the foods it found, and nothing is saved until you press **Log**.

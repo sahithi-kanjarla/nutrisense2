@@ -4,6 +4,7 @@ import { addDays } from '../dates.js';
 import { q, tx } from '../db.js';
 import { checkConflicts, describeConflict, prefsFromProfile, DIET_RULES, ALLERGY_LABELS } from '../safety.js';
 import { findFood, estimateGrams, nutritionFor, per100, normalize } from '../foods.js';
+import { applyCooking, checkEstimate } from '../nutrition.js';
 import { targetsOf, remainingOf, matchPantry, hasNutrition, stockGrams } from '../data.js';
 
 const clamp = (v, min, max, d = 0) => { const x = Number(v); return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : d; };
@@ -144,7 +145,7 @@ function cleanMealItems(rawItems) {
     if (fromMacros > 20 && (kcal === 0 || kcal < expected * 0.65 || (!alcohol && kcal > expected * 1.35 + 40))) kcal = fromMacros + Math.round(alcohol ? 0 : fiber * 2);
     const origin = ORIGINS.includes(it.origin) ? it.origin : 'assumed';
     const confidence = CONFIDENCE.includes(it.confidence) ? it.confidence : 'medium';
-    items.push({ name, quantity: txt(it.quantity, 40), cooking: txt(it.cooking, 120), origin, confidence, kcal, protein, carbs, fat, fiber });
+    items.push(checkEstimate({ name, quantity: txt(it.quantity, 40), cooking: txt(it.cooking, 120), origin, confidence, kcal, protein, carbs, fat, fiber }));
   }
   return items;
 }
@@ -244,8 +245,10 @@ export async function analyzeMeal(text, profile, { image = null, answers = [], c
 export const analyzePhoto = ({ mime, data }, profile) => analyzeMeal('', profile, { image: { mime, data } });
 
 /**
- * Recalculates foods the user has edited or added. Plain foods use the built-in table; foods with a cooking
- * note or an unknown name go to the AI, and fall back to the table (or are reported as unknown).
+ * Recalculates foods the user has edited or added.
+ *  - Foods we know (built-in table or recipe) are calculated exactly: amount x values per 100 g, plus the
+ *    calories of any oil, ghee or butter and any flour blend the cooking note describes. No AI is used.
+ *  - Foods we do not know go to the AI, and are reported as unknown if that also fails.
  */
 export async function estimateItems(rawItems, profile) {
   const list = (Array.isArray(rawItems) ? rawItems : []).slice(0, 12)
@@ -253,16 +256,20 @@ export async function estimateItems(rawItems, profile) {
     .filter((i) => i.name);
   const out = new Array(list.length);
   const needAi = [];
-  const fromTable = (it, food, ignoredCooking = false) => {
-    const { grams, assumed } = estimateGrams(it.quantity || it.name, food);
+
+  const fromTable = (it, food) => {
+    const est = estimateGrams(it.quantity || it.name, food);
+    const cooked = it.cooking ? applyCooking(food, est.grams, it.cooking) : null;
     return {
-      name: it.name, quantity: it.quantity || `${grams} ${food.unit === 'ml' ? 'ml' : 'g'} (assumed)`, cooking: it.cooking,
-      origin: 'user', confidence: assumed ? 'medium' : 'high', ...nutritionFor(food, grams), ...(ignoredCooking ? { cooking_ignored: true } : {})
+      name: it.name, quantity: it.quantity || `${est.grams} ${food.unit === 'ml' ? 'ml' : 'g'} (assumed)`, cooking: it.cooking,
+      origin: 'user', confidence: est.assumed ? 'medium' : 'high',
+      ...(cooked ? cooked.nutrition : nutritionFor(food, est.grams)),
+      basis: est.basis, data_source: food.source, ...(cooked?.detail ? { detail: cooked.detail } : {})
     };
   };
 
   list.forEach((it, idx) => {
-    const food = it.cooking ? null : findFood(it.name, 'meal');
+    const food = findFood(it.name, 'meal');
     if (food) out[idx] = fromTable(it, food);
     else needAi.push(idx);
   });
@@ -278,24 +285,21 @@ export async function estimateItems(rawItems, profile) {
       if (items.length === needAi.length) {
         needAi.forEach((idx, n) => {
           const it = list[idx];
-          out[idx] = { ...items[n], name: it.name, quantity: it.quantity || items[n].quantity, cooking: it.cooking, origin: 'user' };
+          out[idx] = { ...items[n], name: it.name, quantity: it.quantity || items[n].quantity, cooking: it.cooking, origin: 'user', data_source: 'ai' };
         });
       }
-    } catch { /* fall through to the table or unknown handling below */ }
+    } catch { /* reported as unknown below */ }
   }
 
   const unknown = [];
   list.forEach((it, idx) => {
     if (out[idx]) return;
-    const food = findFood(it.name, 'meal');
-    if (food) { out[idx] = fromTable(it, food, Boolean(it.cooking)); return; }
     unknown.push(it.name);
     out[idx] = { name: it.name, quantity: it.quantity, cooking: it.cooking, origin: 'user', confidence: 'low', unknown: true, kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
   });
 
   const counted = out.filter((i) => !i.unknown);
-  const notes = out.some((i) => i.cooking_ignored) ? 'The AI was unavailable, so your cooking notes are saved but not included in the calories.' : '';
-  return { items: out, totals: sumItems(counted), unknown, notes, warnings: mealWarnings(list.map((i) => i.name).join(', '), profile) };
+  return { items: out, totals: sumItems(counted), unknown, notes: '', warnings: mealWarnings(list.map((i) => i.name).join(', '), profile) };
 }
 
 /* ------------------------------ Pantry nutrition ------------------------------ */
