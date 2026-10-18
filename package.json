@@ -1,0 +1,13 @@
+{
+  "name": "nutrisense",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Digital pantry and nutrition app with Gemini and Groq powered AI. Zero npm dependencies.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --watch --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test server/test/*.test.js"
+  }
+}
