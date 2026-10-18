@@ -126,3 +126,12 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--green)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 .shell>div,.main,.cols>div{min-width:0}
 .week{max-width:100%}
+
+/* Meal review */
+.frow{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px;background:#fff}
+.frow-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.frow-badges{display:flex;gap:6px;flex-wrap:wrap}
+.photo-prev{display:flex;gap:12px;align-items:center;margin-top:12px}
+.photo-prev img{width:72px;height:72px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
+.qbox{margin-top:14px;padding:12px;border-radius:12px;background:var(--soft)}
+.qrow{margin:12px 0}
