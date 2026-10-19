@@ -1,12 +1,14 @@
 import { post } from '../api.js';
 import { html, icon, logo, $, $$, toast, busy, today, esc } from '../ui.js';
 import { navigate, state, refreshProfile, logout } from '../app.js';
-import { GOALS, ACTIVITY, DIETS, ALLERGIES, CONDITIONS, QUICK, planSummary, chip, choice, toggleChip } from '../shared.js';
+import { GOALS, ACTIVITY, DIETS, ALLERGIES, CONDITIONS, QUICK, planSummary, chip, choice, toggleChip, mountCondExtras, condExtrasBody } from '../shared.js';
 
 const STEPS = ['Goal', 'About you', 'Activity', 'Eating', 'Health', 'Pantry', 'Your plan'];
 
 export default function onboarding(root) {
   const a = { goal: null, sex: null, age: '', height_cm: '', weight_kg: '', target_weight_kg: '', activity: null, meals_per_day: 3, diet: null, allergies: [], other_allergy: '', dislikes: '', conditions: [], pantry: [] };
+  const extras = { preg_stage: '', rx_sodium_mg: '', rx_protein_g: '', rx_fluid_ml: '' };
+  let redrawExtras = null;
   let step = 0;
   let plan = null;
   let error = '';
@@ -14,7 +16,7 @@ export default function onboarding(root) {
   const body = () => {
     const b = { goal: a.goal, sex: a.sex, age: Number(a.age), height_cm: Number(a.height_cm), weight_kg: Number(a.weight_kg), activity: a.activity, diet: a.diet,
       meals_per_day: a.meals_per_day, allergies: [...a.allergies, ...a.other_allergy.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)].slice(0, 15),
-      dislikes: a.dislikes, conditions: a.conditions };
+      dislikes: a.dislikes, conditions: a.conditions, ...condExtrasBody(a.conditions, extras) };
     if (a.target_weight_kg !== '') b.target_weight_kg = Number(a.target_weight_kg);
     return b;
   };
@@ -55,7 +57,8 @@ export default function onboarding(root) {
         <div class="field"><label class="f" for="a-oa">Anything else you must avoid?</label><input class="input" id="a-oa" placeholder="e.g. mushroom, kiwi (comma separated)" value="${a.other_allergy}" maxlength="120"></div>
         <div class="field"><label class="f" for="a-dl">Foods you simply dislike</label><input class="input" id="a-dl" placeholder="e.g. bitter gourd, olives" value="${a.dislikes}" maxlength="200"></div>
         <div class="field"><label class="f">Health conditions we should be careful about</label><div class="chips" id="cond">${CONDITIONS.map(([k, t]) => chip(k, t, a.conditions.includes(k)))}</div>
-        <div class="hint">This only adds a reminder to check your targets with a doctor or dietitian.</div></div>`;
+        <div class="hint">Pregnancy and doctor-managed conditions change your targets. Every condition adds a reminder to check them with a doctor or dietitian.</div></div>
+        <div id="cond-extra"></div>`;
       case 5: return html`<h2>Stock your pantry</h2><p class="lead">Tick what is usually at home to get started. You can edit quantities and add expiry dates later. Items that clash with your allergies are skipped.</p>
         <div class="chips" id="qk">${QUICK.map(([k, t]) => chip(k, t, a.pantry.includes(k)))}</div>`;
       default: return html`<h2>Your plan is ready</h2><p class="lead">Here is what we worked out. You can fine tune every number later in your profile.</p>
@@ -85,7 +88,8 @@ export default function onboarding(root) {
     $$('#sex .chip').forEach((c) => c.onclick = () => { sync(); a.sex = c.dataset.key; draw(); });
     $$('#mpd .chip').forEach((c) => c.onclick = () => { a.meals_per_day = Number(c.dataset.key); draw(); });
     $$('#alg .chip').forEach((c) => c.onclick = () => { toggleChip(c); a.allergies = $$('#alg .chip.on').map((x) => x.dataset.key); });
-    $$('#cond .chip').forEach((c) => c.onclick = () => { toggleChip(c); a.conditions = $$('#cond .chip.on').map((x) => x.dataset.key); });
+    $$('#cond .chip').forEach((c) => c.onclick = () => { toggleChip(c); a.conditions = $$('#cond .chip.on').map((x) => x.dataset.key); redrawExtras?.(); });
+    redrawExtras = $('#cond-extra') ? mountCondExtras($('#cond-extra'), () => a.conditions, extras) : null;
     $$('#qk .chip').forEach((c) => c.onclick = () => { toggleChip(c); a.pantry = $$('#qk .chip.on').map((x) => x.dataset.key); $('#next').textContent = a.pantry.length ? 'Continue' : 'Skip for now'; });
     $('#next').onclick = next;
     $('#stepbox').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); next(); } });

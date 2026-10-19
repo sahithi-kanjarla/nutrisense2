@@ -16,7 +16,7 @@ export default async function assistant(root) {
   <div class="top"><div><h1>AI assistant</h1><p>It knows your pantry, goals${allergies.length ? ' and allergies' : ''}.</p></div><button class="btn ghost" id="clear">Clear chat</button></div>
   <div class="card chat"><div class="msgs" id="msgs"></div><div class="sugg" id="sugg"></div>
     <form class="composer" id="form"><input class="input" id="in" placeholder="Ask about meals, recipes or your day…" maxlength="600" autocomplete="off" aria-label="Message"><button class="btn primary" id="send" aria-label="Send">${icon('send')}</button></form></div>
-  <p class="small muted" style="margin-top:10px">General nutrition guidance only, not medical advice. Your profile and pantry are shared with the AI provider to answer you.</p>`);
+  <p class="small muted" style="margin-top:10px">General nutrition guidance only, not medical advice. Please talk to a doctor or registered dietitian about health conditions, medicines, pregnancy or worries about eating. Your profile and pantry are shared with the AI provider to answer you.</p>`);
 
   const box = $('#msgs');
   const paint = () => {

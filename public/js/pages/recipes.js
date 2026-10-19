@@ -1,4 +1,5 @@
 import { get, post, del } from '../api.js';
+import { state } from '../app.js';
 import { html, icon, num, today, $, $$, toast, busy, aiDown, emptyState, cap, esc } from '../ui.js';
 
 const FILTERS = [['pantry', 'From my pantry'], ['use_soon', 'Use up expiring'], ['high_protein', 'High protein'], ['quick', 'Quick (30 min or less)']];
@@ -8,6 +9,7 @@ export function recipeCard(r, { saved = false, onSave, onDelete, onLog } = {}) {
   return html`<div class="rcard">
     <div class="row between wrap"><h4>${r.title}</h4>${r.tag ? html`<span class="tag">${r.tag}</span>` : ''}</div>
     <p class="small muted">${r.time_min} min · serves ${r.servings} · <b>${num(r.kcal)} kcal</b> · ${num(r.protein, 1)}g protein · ${num(r.fiber, 1)}g fiber (per serving)</p>
+    ${r.sodium_note ? html`<p class="small muted" style="margin-top:6px">${r.sodium_mg != null ? `About ${num(r.sodium_mg)} mg sodium a serving. ` : ''}${r.sodium_note}</p>` : ''}
     ${m ? html`<p class="small" style="margin-top:6px"><span class="tag ${m.missing.length ? 'amber' : ''}">${m.have}/${m.total} ingredients in pantry</span></p>` : ''}
     <ul>${r.ingredients.map((i) => html`<li class="${i.status === 'missing' ? 'ing-miss' : i.status === 'use_soon' ? 'ing-soon' : i.status === 'in_pantry' ? 'ing-have' : ''}">${i.qty ? `${i.qty} ` : ''}${i.name}${i.status === 'use_soon' ? ' (use soon)' : i.status === 'missing' ? ' (need to buy)' : ''}</li>`)}</ul>
     ${r.steps?.length ? html`<details><summary class="small" style="cursor:pointer;font-weight:600">Method</summary><ol>${r.steps.map((s) => html`<li>${s}</li>`)}</ol></details>` : ''}
@@ -32,7 +34,7 @@ export default async function recipes(root) {
     <div class="top"><div><h1>Recipes</h1><p>Ideas that fit your pantry, your diet and your allergies.</p></div>
       <div class="pill-tabs"><button class="${tab === 'ideas' ? 'on' : ''}" data-tab="ideas">Ideas</button><button class="${tab === 'saved' ? 'on' : ''}" data-tab="saved">Saved (${saved.length})</button></div></div>
     ${tab === 'ideas' ? html`
-      <div class="row wrap" style="margin-bottom:18px"><div class="chips">${FILTERS.map(([k, t]) => html`<button class="chip ${filter === k ? 'on' : ''}" data-f="${k}">${t}</button>`)}</div>
+      <div class="row wrap" style="margin-bottom:18px"><div class="chips">${FILTERS.filter(([k]) => !(k === 'high_protein' && state.profile?.conditions?.includes('clin'))).map(([k, t]) => html`<button class="chip ${filter === k ? 'on' : ''}" data-f="${k}">${t}</button>`)}</div>
         <button class="btn primary right" id="gen">${icon('sparkle')}${list ? 'New ideas' : 'Get recipe ideas'}</button></div>
       ${notice}
       ${list?.length ? html`<div class="recipes" id="rl">${list.map((r) => recipeCard(r, { onSave: true, onLog: true }))}</div>` : ''}

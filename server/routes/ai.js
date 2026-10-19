@@ -4,7 +4,7 @@ import { HttpError, bad, rateLimit, str } from '../lib/http.js';
 import { addDays, dateOr, weekStart } from '../lib/dates.js';
 import { dayTotals, getPantry, getProfile, remainingOf, targetsOf } from '../lib/data.js';
 import { aiStatus } from '../lib/ai/index.js';
-import { prefsFromProfile } from '../lib/safety.js';
+import { prefsFromProfile, screenMessage, SUPPORT_REPLY } from '../lib/safety.js';
 import { rangeStats } from '../lib/stats.js';
 import { balanceDay, chat, generateRecipes, planWeek, weeklyReview } from '../lib/ai/features.js';
 
@@ -45,6 +45,12 @@ export function register(router) {
     limit(ctx);
     const message = str(ctx.body.message, { min: 1, max: 600, field: 'Message' });
     const date = dateOr(ctx.body.date);
+    if (screenMessage(message)) {
+      // Worrying messages about eating very little or purging get a fixed, caring reply and are never sent to the AI.
+      q.run('INSERT INTO chat_messages (user_id, role, content) VALUES (?,?,?)', ctx.user.id, 'user', message);
+      const r = q.run('INSERT INTO chat_messages (user_id, role, content) VALUES (?,?,?)', ctx.user.id, 'assistant', SUPPORT_REPLY);
+      return { id: Number(r.lastInsertRowid), reply: SUPPORT_REPLY, recipe: null, provider: null, support: true };
+    }
     const history = q.all('SELECT role, content FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 12', ctx.user.id).reverse();
     const result = await chat({ ...snapshot(ctx, date), history, message });
     q.run('INSERT INTO chat_messages (user_id, role, content) VALUES (?,?,?)', ctx.user.id, 'user', message);
@@ -60,11 +66,13 @@ export function register(router) {
   router.add('POST', '/api/ai/recipes', async (ctx) => {
     limit(ctx);
     const date = dateOr(ctx.body.date);
-    const filter = FILTERS.includes(ctx.body.filter) ? ctx.body.filter : 'pantry';
     const snap = snapshot(ctx, date);
+    let filter = FILTERS.includes(ctx.body.filter) ? ctx.body.filter : 'pantry';
+    if (filter === 'high_protein' && (snap.profile.conditions || []).includes('clin')) filter = 'pantry'; // protein is a ceiling for them
     const sig = createHash('sha1').update(JSON.stringify([
       filter, date, snap.pantry.map((i) => [i.name, Math.round(i.quantity), i.status]),
-      snap.profile.diet, snap.profile.allergies, snap.profile.dislikes, snap.profile.calories
+      snap.profile.diet, snap.profile.allergies, snap.profile.dislikes, snap.profile.calories,
+      snap.profile.conditions, snap.profile.preg_stage, snap.profile.rx_sodium_mg, snap.profile.rx_protein_g
     ])).digest('hex').slice(0, 16);
     const key = `recipes:${sig}`;
     if (!ctx.body.refresh) {

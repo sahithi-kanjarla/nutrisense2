@@ -19,7 +19,7 @@ export default async function settings(root) {
     <div class="card"><div class="card-h"><h3>Preferences</h3></div>
       <p class="hint" style="margin:0 0 12px">NutriSense shows all numbers in kcal and metric units (kg, cm, g, ml).</p>
       <h4 style="margin:12px 0 4px">Reminders</h4>
-      ${NOTIFY.map(([k, t, d]) => html`<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="grow"><b>${t}</b><div class="small muted">${d}</div></div><button class="switch ${n[k] ? 'on' : ''}" role="switch" aria-checked="${Boolean(n[k])}" data-k="${k}" aria-label="${t}"></button></div>`)}
+      ${NOTIFY.filter(([k]) => !(k === 'hydration' && P.conditions?.includes('clin'))).map(([k, t, d]) => html`<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="grow"><b>${t}</b><div class="small muted">${d}</div></div><button class="switch ${n[k] ? 'on' : ''}" role="switch" aria-checked="${Boolean(n[k])}" data-k="${k}" aria-label="${t}"></button></div>`)}
       <p class="hint">Reminder choices are saved. Delivery needs a notification service, which is not set up in this version.</p>
       <button class="btn primary" id="sp" style="margin-top:12px">Save preferences</button></div>
   </div><div>
