@@ -256,6 +256,9 @@ import { sumItems } from '../lib/ai/features.js';
 import { NUTRIENTS } from '../lib/food-nutrients.js';
 
 const OLD_PROFILES = 'CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, calories INTEGER)';
+const OLD_PANTRY = `CREATE TABLE pantry_items (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 0,
+  unit TEXT NOT NULL DEFAULT 'g', location TEXT NOT NULL DEFAULT 'dry', expires_on TEXT, kcal100 REAL, protein100 REAL, carbs100 REAL, fat100 REAL, fiber100 REAL)`;
+const PANTRY_V3 = ['brand', 'category', 'ingredients', 'allergens', 'sodium100', 'sugar100', 'sat_fat100', 'expiry_kind', 'expiry_text', 'mfg_on', 'label_nutrition', 'source'];
 const OLD_MEALS = `CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, date TEXT NOT NULL, meal_type TEXT NOT NULL,
   name TEXT NOT NULL, serving TEXT, kcal REAL NOT NULL DEFAULT 0, protein REAL NOT NULL DEFAULT 0, carbs REAL NOT NULL DEFAULT 0,
   fat REAL NOT NULL DEFAULT 0, fiber REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual', logged_at TEXT NOT NULL DEFAULT (datetime('now')))`;
@@ -267,15 +270,22 @@ test('migration: an old database gains the new columns, keeps every row, and old
     const old = new DatabaseSync(file);
     old.exec(OLD_MEALS);
     old.exec(OLD_PROFILES);
+    old.exec(OLD_PANTRY);
+    old.exec("INSERT INTO pantry_items (user_id, name, quantity, unit, expires_on, kcal100, protein100, fiber100) VALUES (1, 'Rice', 2000, 'g', '2027-01-01', 130, 2.7, 0), (1, 'Mystery flour', 500, 'g', NULL, NULL, NULL, NULL)");
     old.exec("INSERT INTO profiles (user_id, calories) VALUES (1, 1800)");
     old.exec("INSERT INTO meals (user_id, date, meal_type, name, kcal) VALUES (1, '2026-10-01', 'lunch', 'Old dal', 300), (1, '2026-10-02', 'dinner', 'Old rice', 200)");
     assert.equal(versionOf(old), 0);
 
     const result = migrate(old, { file });
-    assert.deepEqual(result.added, ['sodium_mg', 'added_sugar', 'sat_fat', 'nutrient_gaps', 'preg_stage', 'rx_sodium_mg', 'rx_protein_g', 'rx_fluid_ml']);
+    assert.deepEqual(result.added, ['sodium_mg', 'added_sugar', 'sat_fat', 'nutrient_gaps', 'preg_stage', 'rx_sodium_mg', 'rx_protein_g', 'rx_fluid_ml', ...PANTRY_V3]);
     assert.equal(versionOf(old), SCHEMA_VERSION);
     assert.ok(existsSync(`${file}.before-v1`), 'a backup of the old file is written before it changes');
     assert.ok(existsSync(`${file}.before-v2`));
+    assert.ok(existsSync(`${file}.before-v3`));
+    const pantryRows = old.prepare('SELECT * FROM pantry_items ORDER BY id').all();
+    assert.equal(pantryRows.length, 2, 'every pantry item survives');
+    assert.deepEqual(pantryRows.map((r) => [r.name, r.quantity, r.expires_on, r.kcal100, r.fiber100]), [['Rice', 2000, '2027-01-01', 130, 0], ['Mystery flour', 500, null, null, null]], 'existing values, including a real zero, are untouched');
+    assert.ok(pantryRows.every((r) => PANTRY_V3.every((c) => r[c] === null)), 'new label fields start as "not recorded", never zero');
     const prof = old.prepare('SELECT * FROM profiles').get();
     assert.equal(prof.calories, 1800, 'existing profiles keep their targets');
     assert.ok(prof.preg_stage === null && prof.rx_sodium_mg === null && prof.rx_protein_g === null && prof.rx_fluid_ml === null, 'new profile fields are "not set", never zero');
@@ -294,6 +304,10 @@ test('migration: an old database gains the new columns, keeps every row, and old
     assert.ok(!backup.prepare('PRAGMA table_info(meals)').all().some((c) => c.name === 'sodium_mg'));
     assert.equal(versionOf(backup), 0);
     backup.close();
+    const backup3 = new DatabaseSync(`${file}.before-v3`);
+    assert.equal(versionOf(backup3), 2, 'the v3 backup is the database as it was before the pantry change');
+    assert.ok(!backup3.prepare('PRAGMA table_info(pantry_items)').all().some((c) => c.name === 'brand'));
+    backup3.close();
     old.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -302,6 +316,7 @@ test('migration: a database that already has the columns is only stamped, and a 
   const fresh = new DatabaseSync(':memory:');
   fresh.exec(OLD_MEALS.replace('source TEXT', 'sodium_mg REAL, added_sugar REAL, sat_fat REAL, nutrient_gaps INTEGER NOT NULL DEFAULT 0, source TEXT'));
   fresh.exec('CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, preg_stage TEXT, rx_sodium_mg REAL, rx_protein_g REAL, rx_fluid_ml REAL)');
+  fresh.exec(`CREATE TABLE pantry_items (id INTEGER PRIMARY KEY, ${PANTRY_V3.map((c) => `${c} TEXT`).join(', ')})`);
   assert.deepEqual(migrate(fresh).added, []);
   assert.equal(versionOf(fresh), SCHEMA_VERSION);
 
@@ -754,4 +769,90 @@ test('pantry matching: expired and unknown-expiry items', async () => {
   assert.equal(matchPantry('milk', pantry).id, 2, 'an item with no expiry date is preferred to an expired one');
   assert.equal(matchPantry('milk', [pantry[0]]).status, 'expired', 'only an expired match is still reported as expired, never as fresh');
   assert.equal(matchPantry('boiled egg', [{ name: 'Oil', status: 'ok' }]), null);
+});
+
+/* ------------------------------ PR 6: label parsing ------------------------------ */
+
+test('label dates: clear dates are read, anything with two readings or missing parts is flagged', async () => {
+  const { parseLabelDate, kindFromText } = await import('../lib/scan.js');
+  const exact = {
+    '2026-12-25': '2026-12-25', 'BEST BEFORE 25/12/2026': '2026-12-25', '25.12.26': '2026-12-25', '12/25/2026': '2026-12-25', 'EXP 03 NOV 2026': '2026-11-03',
+    '3-Nov-26': '2026-11-03', 'Nov 3, 2026': '2026-11-03', 'Use by 05/05/2026': '2026-05-05', '29 FEB 2028': '2028-02-29', 'SEPT 9 2026': '2026-09-09'
+  };
+  for (const [text, want] of Object.entries(exact)) {
+    const r = parseLabelDate(text);
+    assert.deepEqual([r.date, r.ambiguous], [want, false], text);
+  }
+  for (const text of ['03/04/2026', '01-02-2026', '04.05.26']) {
+    const r = parseLabelDate(text);
+    assert.equal(r.ambiguous, true, text);
+    assert.match(r.note, /day\/month or month\/day/);
+  }
+  assert.equal(parseLabelDate('03/04/2026').date, '2026-04-03', 'day first is offered, but must be confirmed');
+  for (const [text, date] of [['BB 11/2026', '2026-11-30'], ['NOV 2026', '2026-11-30'], ['02/27', '2027-02-28'], ['11.2028', '2028-11-30']]) {
+    const r = parseLabelDate(text);
+    assert.deepEqual([r.date, r.ambiguous], [date, true], text);
+    assert.match(r.note, /month and year/);
+  }
+  for (const text of ['31/02/2026', '2026-13-01', '99/99/2026', '30/02/26', 'someday', '6 months from packaging', '??']) {
+    const r = parseLabelDate(text);
+    assert.equal(r.date === null || r.ambiguous, true, text);
+    assert.ok(r.ambiguous && r.note, text);
+  }
+  assert.deepEqual(parseLabelDate(''), { date: null, ambiguous: false, note: '' });
+  assert.equal(kindFromText('USE BY 03 NOV 2026'), 'use_by');
+  assert.equal(kindFromText('Best before end of Nov 2026'), 'best_before');
+  assert.equal(kindFromText('BB 11/26'), 'best_before');
+  assert.equal(kindFromText('EXP 11/26'), 'expiry');
+  assert.equal(kindFromText('11/26'), 'unknown');
+});
+
+test('label nutrition: per-100 values only when the basis and serving size make it exact', async () => {
+  const { toPer100 } = await import('../lib/scan.js');
+  const n = (basis, extra, values) => ({ basis, serving_size: null, serving_unit: null, values: { energy_kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null, sodium_mg: null, sugar_g: null, sat_fat_g: null, ...values }, ...extra });
+  assert.equal(toPer100(n('100g', {}, { energy_kcal: 250, protein_g: 0 }), 'g').protein100, 0, 'a printed zero stays zero');
+  assert.equal(toPer100(n('100g', {}, { energy_kcal: 250 }), 'g').protein100, null, 'a value that was not printed stays null');
+  assert.equal(toPer100(n('serving', { serving_size: 30, serving_unit: 'g' }, { energy_kcal: 120, sodium_mg: 90 }), 'g').kcal100, 400);
+  assert.equal(toPer100(n('serving', { serving_size: 30, serving_unit: 'g' }, { energy_kcal: 120, sodium_mg: 90 }), 'g').sodium100, 300);
+  assert.equal(toPer100(n('serving', { serving_size: 250, serving_unit: 'ml' }, { energy_kcal: 100 }), 'ml').kcal100, 40);
+  assert.equal(toPer100(n('serving', { serving_size: 250, serving_unit: 'ml' }, { energy_kcal: 100 }), 'g').kcal100, null, 'ml cannot become g without a density');
+  assert.equal(toPer100(n('serving', {}, { energy_kcal: 100 }), 'g').kcal100, null, 'no serving size');
+  assert.equal(toPer100(n(null, {}, { energy_kcal: 100 }), 'g').kcal100, null, 'unknown basis');
+  assert.equal(toPer100(null, 'g').kcal100, null);
+  assert.equal(toPer100(n('100g', {}, { energy_kcal: 250 }), 'pcs').kcal100, 250);
+});
+
+test('label products: the same checks clean AI output and refuse a bad confirmation', async () => {
+  const { readProduct, readImages } = await import('../lib/scan.js');
+  const lenient = readProduct({ name: 'Bar', nutrition: { basis: '100g', values: { fat_g: 5, sat_fat_g: 9, sugar_g: 3, carbs_g: 1 } } });
+  assert.ok(lenient.notes.some((n) => /Saturated fat/.test(n)) && lenient.notes.some((n) => /Sugar cannot/.test(n)), 'flagged for the person, not silently fixed');
+  assert.equal(lenient.product.nutrition.values.sat_fat_g, 9, 'the printed value is kept for the person to correct');
+  assert.throws(() => readProduct({ name: 'Bar', nutrition: { basis: '100g', values: { fat_g: 5, sat_fat_g: 9 } } }, { strict: true }), /Saturated fat/);
+  // Energy and salt printed in other units are converted exactly and the person is told.
+  const conv = readProduct({ name: 'X', nutrition: { basis: '100g', values: { energy_kj: 1046, salt_g: 1 } } });
+  assert.equal(conv.product.nutrition.values.energy_kcal, 250);
+  assert.equal(conv.product.nutrition.values.sodium_mg, 393);
+  assert.ok(conv.notes.some((n) => /kilojoules/.test(n)) && conv.notes.some((n) => /salt/.test(n)));
+  // Text from the AI is stripped of markup, and the date comes from the printed text, never from the AI's own date.
+  const t = readProduct({ name: '<b>Tea</b>', expiry: { text: '31/12/2026', date: '1999-01-01' } });
+  assert.ok(!/[<>]/.test(t.product.name));
+  assert.equal(t.product.expiry.date, '2026-12-31');
+  assert.throws(() => readImages('nope'), /at least one/);
+  assert.equal(readImages([{ mime: 'image/png', image: 'data:image/png;base64,AAAA' }])[0].data, 'AAAA');
+});
+
+test('duplicates: same name or same brand with a shared word, never just the same brand', async () => {
+  const { findDuplicates } = await import('../lib/scan.js');
+  const items = [
+    { id: 1, name: 'Butter', brand: null, unit: 'g', quantity: 500 }, { id: 2, name: 'Amul Cheese Slices', brand: 'Amul', unit: 'g', quantity: 200 },
+    { id: 3, name: 'Toned milk', brand: 'Amul', unit: 'ml', quantity: 1000 }, { id: 4, name: 'Moong dal', brand: null, unit: 'g', quantity: 500 }
+  ];
+  const ids = (p) => findDuplicates(items, p).map((d) => d.id);
+  assert.deepEqual(ids({ name: 'butter', package: { size: 100, unit: 'g' } }), [1]);
+  assert.deepEqual(ids({ name: 'Cheese slices', brand: 'Amul', package: { size: 100, unit: 'g' } }), [2]);
+  assert.deepEqual(ids({ name: 'Butter', brand: 'Amul', package: { size: 1, unit: 'kg' } }), [1]);
+  assert.deepEqual(ids({ name: 'Paneer', brand: 'Amul', package: { size: 200, unit: 'g' } }), [], 'a different product from the same brand');
+  assert.deepEqual(ids({ name: 'Toned milk', package: { size: 500, unit: 'g' } }), [], 'grams and millilitres are not the same stock');
+  assert.deepEqual(ids({ name: 'Moong', package: { size: 1, unit: 'kg' } }), [], 'a partial name alone is not enough');
+  assert.deepEqual(ids({ name: '' }), []);
 });

@@ -9,13 +9,20 @@ import { copyFileSync, existsSync } from 'node:fs';
  *   1 -> 2  profiles gain preg_stage (t1, t2, t3 or bf) and the limits a clinician may have given the user:
  *           rx_sodium_mg, rx_protein_g, rx_fluid_ml. NULL means "not set", never zero.
  *
+ *   2 -> 3  pantry_items gain what a package label carries, for items saved from the pantry scanner:
+ *           brand, category, ingredients, allergens (JSON list as declared on the label), sodium100, sugar100,
+ *           sat_fat100 (per 100 g or 100 ml, like the existing nutrition columns), expiry_kind (use_by, best_before,
+ *           expiry or unknown), expiry_text (the date as printed), mfg_on, label_nutrition (JSON: the values exactly as
+ *           printed, with their unit and basis) and source ('scan'; NULL for items added by hand).
+ *
  * Old rows keep NULL, which means "not recorded", never zero. Safe to run on every start.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const STEPS = [
   { version: 1, table: 'meals', columns: [['sodium_mg', 'REAL'], ['added_sugar', 'REAL'], ['sat_fat', 'REAL'], ['nutrient_gaps', 'INTEGER NOT NULL DEFAULT 0']] },
-  { version: 2, table: 'profiles', columns: [['preg_stage', 'TEXT'], ['rx_sodium_mg', 'REAL'], ['rx_protein_g', 'REAL'], ['rx_fluid_ml', 'REAL']] }
+  { version: 2, table: 'profiles', columns: [['preg_stage', 'TEXT'], ['rx_sodium_mg', 'REAL'], ['rx_protein_g', 'REAL'], ['rx_fluid_ml', 'REAL']] },
+  { version: 3, table: 'pantry_items', columns: [['brand', 'TEXT'], ['category', 'TEXT'], ['ingredients', 'TEXT'], ['allergens', 'TEXT'], ['sodium100', 'REAL'], ['sugar100', 'REAL'], ['sat_fat100', 'REAL'], ['expiry_kind', 'TEXT'], ['expiry_text', 'TEXT'], ['mfg_on', 'TEXT'], ['label_nutrition', 'TEXT'], ['source', 'TEXT']] }
 ];
 
 const columnsOf = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));

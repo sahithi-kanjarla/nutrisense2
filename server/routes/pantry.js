@@ -1,28 +1,29 @@
 import { q } from '../lib/db.js';
 import { HttpError, bad, num, oneOf, str } from '../lib/http.js';
 import { dateOr, daysBetween, isDate } from '../lib/dates.js';
-import { getPantry } from '../lib/data.js';
+import { decodeLabel, getPantry } from '../lib/data.js';
+import { aiStatus } from '../lib/ai/index.js';
 import { estimatePantryNutrition } from '../lib/ai/features.js';
 import { defaultUnitFor, findFood } from '../lib/foods.js';
 
-const LOCATIONS = ['fridge', 'dry', 'freezer', 'other'];
+export const LOCATIONS = ['fridge', 'dry', 'freezer', 'other'];
 const NUTRITION_KEYS = ['kcal100', 'protein100', 'carbs100', 'fat100', 'fiber100'];
 const NOT_PROTEIN_SOURCE = /\b(oil|sugar|jaggery|honey|ghee|butter|flour|atta|maida|masala|spice|powder)\b/i;
 
-function normalizeQty(quantity, unit) {
+export function normalizeQty(quantity, unit) {
   if (unit === 'kg') return { quantity: quantity * 1000, unit: 'g' };
   if (unit === 'l') return { quantity: quantity * 1000, unit: 'ml' };
   return { quantity, unit };
 }
 
-function withStatus(row, today) {
+export function withStatus(row, today) {
   const days_left = row.expires_on ? daysBetween(today, row.expires_on) : null;
-  return { ...row, days_left, status: days_left === null ? 'ok' : days_left < 0 ? 'expired' : days_left <= 3 ? 'soon' : 'ok' };
+  return { ...decodeLabel(row), days_left, status: days_left === null ? 'ok' : days_left < 0 ? 'expired' : days_left <= 3 ? 'soon' : 'ok' };
 }
 
 const isLow = (it) => (it.unit === 'pcs' ? it.quantity <= 2 : it.quantity <= 100);
 
-function ownedItem(userId, id) {
+export function ownedItem(userId, id) {
   const row = q.get('SELECT * FROM pantry_items WHERE id = ? AND user_id = ?', Number(id), userId);
   if (!row) throw new HttpError(404, 'Pantry item not found.');
   return row;
@@ -37,6 +38,7 @@ export function register(router) {
       .sort((a, b) => b.protein100 - a.protein100).slice(0, 3).map((i) => i.name);
     return {
       items,
+      scan: { available: aiStatus().gemini },
       stats: {
         total: items.length,
         expiring: items.filter((i) => i.status === 'soon').length,
@@ -96,7 +98,8 @@ export function register(router) {
     if (b.location !== undefined) { sets.push('location = ?'); vals.push(oneOf(b.location, LOCATIONS, 'Location')); }
     if (b.expires_on !== undefined) {
       if (b.expires_on && !isDate(b.expires_on)) throw bad('Expiry date must look like 2026-10-31.');
-      sets.push('expires_on = ?'); vals.push(b.expires_on || null);
+      // A date typed by hand replaces the printed one, so the stored printed text no longer describes it.
+      sets.push('expires_on = ?', 'expiry_text = NULL'); vals.push(b.expires_on || null);
     }
     if (sets.length) q.run(`UPDATE pantry_items SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`, ...vals, row.id);
     return { item: withStatus(ownedItem(ctx.user.id, row.id), today) };

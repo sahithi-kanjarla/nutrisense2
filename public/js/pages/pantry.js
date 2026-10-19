@@ -1,4 +1,5 @@
 import { get, post, patch, del } from '../api.js';
+import { openScanner } from './pantry-scan.js';
 import { html, icon, num, today, $, $$, toast, busy, modal, confirmBox, emptyState, cap, esc } from '../ui.js';
 
 const LOCS = [['all', 'All'], ['fridge', 'Fridge'], ['dry', 'Dry store'], ['freezer', 'Freezer'], ['other', 'Other']];
@@ -17,7 +18,8 @@ export default async function pantry(root) {
     const items = data.items.filter((i) => (loc === 'all' || i.location === loc) && i.name.toLowerCase().includes(q.toLowerCase()));
     const s = data.stats;
     root.innerHTML = String(html`
-    <div class="top"><div><h1>Pantry</h1><p>Everything you have at home, and when it needs using.</p></div><button class="btn primary" id="add">${icon('plus')}Add item</button></div>
+    <div class="top"><div><h1>Pantry</h1><p>Everything you have at home, and when it needs using.</p></div><div class="row"><button class="btn" id="scan" ${data.scan?.available ? '' : 'disabled'} title="${data.scan?.available ? '' : 'Needs a Gemini API key'}">${icon('camera')}Scan package</button><button class="btn primary" id="add">${icon('plus')}Add item</button></div></div>
+    ${data.scan?.available ? '' : html`<p class="hint">Package scanning is turned off because no Gemini API key is set. You can still add items by hand.</p>`}
     <div class="stats-row">
       <div class="card stat"><div class="ico-b">${icon('pantry', 22)}</div><div><b>${s.total}</b><span>items</span></div></div>
       <div class="card stat"><div class="ico-b" style="background:#fdf3dc;color:#9a6a0a">${icon('alert', 22)}</div><div><b>${s.expiring}</b><span>expiring soon</span></div></div>
@@ -29,12 +31,15 @@ export default async function pantry(root) {
       <input class="input" id="q" placeholder="Search pantry" value="${q}" style="max-width:240px" aria-label="Search pantry"></div>
     ${items.length ? html`<div class="pantry-grid">${items.map((i) => html`<div class="card pi ${i.status}" data-id="${i.id}">
         <h4><span>${i.name}</span>${expiryTag(i)}</h4>
+        ${i.brand ? html`<div class="small muted">${i.brand}${i.source === 'scan' ? ' · from package label' : ''}</div>` : ''}
+        ${i.allergens?.contains?.length ? html`<div class="small">Label declares: ${i.allergens.contains.join(', ')}</div>` : ''}
         <div class="qty">${num(i.quantity)} <span class="muted" style="font-size:14px">${i.unit}</span></div>
         <div class="nut">${i.protein100 != null ? `Per 100 g: ${num(i.kcal100)} kcal · ${num(i.protein100, 1)} g protein` : 'Nutrition not set'}</div>
         <div class="row" style="margin-top:12px"><span class="tag gray">${cap(i.location)}</span><span class="right"></span>
           <button class="icon-btn" data-edit="${i.id}" aria-label="Edit ${i.name}">${icon('settings')}</button><button class="icon-btn" data-del="${i.id}" aria-label="Delete ${i.name}">${icon('trash')}</button></div></div>`)}</div>`
       : data.items.length ? emptyState('No matches', 'Try another search or location.') : emptyState('Your pantry is empty', 'Add what you have at home and NutriSense will track it for you.', html`<button class="btn primary" id="add2">${icon('plus')}Add your first item</button>`)}`);
     $('#add').onclick = () => form();
+    $('#scan').onclick = () => openScanner({ onSaved: reload });
     $('#add2') && ($('#add2').onclick = () => form());
     $$('[data-loc]').forEach((b) => b.onclick = () => { loc = b.dataset.loc; draw(); });
     const qi = $('#q'); qi.oninput = () => { q = qi.value; const pos = qi.selectionStart; draw(); const n = $('#q'); n.focus(); n.setSelectionRange(pos, pos); };

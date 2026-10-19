@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS pantry_items (
   location TEXT NOT NULL DEFAULT 'dry',
   expires_on TEXT,
   kcal100 REAL, protein100 REAL, carbs100 REAL, fat100 REAL, fiber100 REAL,
+  brand TEXT, category TEXT, ingredients TEXT, allergens TEXT, sodium100 REAL, sugar100 REAL, sat_fat100 REAL,
+  expiry_kind TEXT, expiry_text TEXT, mfg_on TEXT, label_nutrition TEXT, source TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
