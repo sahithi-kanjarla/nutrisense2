@@ -1,6 +1,7 @@
 import { get, post, put } from '../api.js';
 import { html, icon, ring, bar, num, today, niceDate, $, $$, toast, busy, aiDown, emptyState, cap, parseDate } from '../ui.js';
 import { state } from '../app.js';
+import { watchRows } from '../shared.js';
 
 export default async function dashboard(root) {
   const date = today();
@@ -34,6 +35,7 @@ export default async function dashboard(root) {
       <div class="card"><div class="card-h"><h3>Today's meals</h3><a class="small right" data-link href="/meals">Open log</a></div>
         ${d.meals.length ? html`<div class="list">${d.meals.map((m) => html`<div class="item"><div class="grow"><b>${m.name}</b><span class="small muted">${cap(m.meal_type)}${m.serving ? ` · ${m.serving}` : ''}</span></div><div style="text-align:right"><b>${num(m.kcal)} kcal</b><div class="small muted">${num(m.protein)}g protein</div></div></div>`)}</div>`
           : emptyState('Nothing logged yet', 'Log your first meal and your targets will start filling in.', html`<a class="btn primary" data-link href="/meals">Log a meal</a>`)}</div>
+      <div class="card" id="watch"><div class="card-h"><h3>Watch list</h3><span class="small muted right">stay under</span></div>${d.meals.length ? watchRows(d.watch) : html`<p class="muted small">Sodium, saturated fat and added sugar appear here once you log a meal.</p>`}</div>
     </div>
     <div>
       <div class="card"><div class="card-h"><h3>Water</h3><span class="tag right">${d.water.glasses} / ${d.water.goal} glasses</span></div>

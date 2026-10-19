@@ -2,7 +2,8 @@ import { q } from '../lib/db.js';
 import { bad, num } from '../lib/http.js';
 import { computePlan, isAutoPlan } from '../lib/plan.js';
 import { addDays, dateOr, dateRange, todayStr } from '../lib/dates.js';
-import { dayTotals, getPantry, getProfile, remainingOf, targetsOf } from '../lib/data.js';
+import { dayTotals, getPantry, getProfile, remainingOf, targetsOf, watchFor } from '../lib/data.js';
+import { limitsOf, WATCH } from '../lib/limits.js';
 import { perDay, rangeStats } from '../lib/stats.js';
 
 function streakFor(userId, date) {
@@ -31,6 +32,7 @@ export function register(router) {
       targets,
       totals,
       remaining: remainingOf(targets, totals),
+      watch: watchFor(profile, totals),
       meals: q.all('SELECT * FROM meals WHERE user_id = ? AND date = ? ORDER BY id', ctx.user.id, date),
       water: { glasses: waterFor(ctx.user.id, date), goal: targets.water_glasses },
       streak: streakFor(ctx.user.id, date),
@@ -105,8 +107,17 @@ export function register(router) {
       status: !d.logged ? 'none' : d.kcal >= targets.calories * 0.85 && d.kcal <= targets.calories * 1.15 ? 'target' : 'logged'
     }));
 
+    // Average sodium, saturated fat and added sugar per day (days with data only) against the daily limits.
+    const limits = limitsOf(profile, targets);
+    const watchAvg = WATCH.map((w) => {
+      const s = stats.watch[w.key];
+      const lim = limits[w.key].limit;
+      const status = s.avg == null ? 'unknown' : s.avg > lim ? 'over' : s.partial_days > 0 || s.days_with_data < s.logged_days ? 'unsure' : s.avg >= lim * 0.85 ? 'near' : 'ok';
+      return { key: w.key, label: w.label, unit: w.unit, limit: lim, why: limits[w.key].why, ...s, status };
+    });
+
     return {
-      date, days, targets,
+      date, days, targets, watch: watchAvg,
       weight: { series: weights, current: latest?.kg ?? profile.weight_kg, goal: profile.target_weight_kg, change: stats.weight_change },
       avg: a, split, coverage, calendar: cal,
       logged_days: stats.logged_days, protein_hits: stats.protein_hits, kcal_on_target: stats.kcal_on_target

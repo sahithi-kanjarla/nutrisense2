@@ -40,6 +40,18 @@ Safety is enforced in code, not only in prompts: AI recipes (title, ingredients,
 - **Foods the table does not know** are estimated by the AI. Its numbers are checked: calories above 9 kcal per gram are impossible and are lowered, nutrients that outweigh the food are scaled down, and an estimate far from the built-in table is flagged "Check" with the table's figure.
 - **Data sources.** Each table entry has a source: `usda-checked` (compared with USDA FoodData Central and within a few percent: rice, cooked rice, atta, oats, maida, besan, toor, moong and masoor dal), `calculated` (cooked dishes built from ingredients), or `reference` (typical IFCT or USDA values entered by hand, not individually verified). Treat everything as an estimate: real portions, brands and recipes vary by 10 to 25 percent.
 
+## Sodium, saturated fat and added sugar
+
+These three are tracked next to calories and macros, with a **Watch list** on the dashboard, the meal log and Progress.
+
+- **Missing data is not zero.** Each food has a figure or "no data" (`null`). A food with no reliable figure (for example protein powder) is never counted as 0. Totals add up only the foods and meals that have data and are worded **"At least X"** when some do not ("At least 1,450 mg, 2 of 3 meals have full data"). A total that is under the limit but incomplete shows **May be higher**, not a green tick; a total that is already over the limit says so even when data is missing, because the real figure can only be higher. Old meals logged before this feature have no data and are left out of these totals.
+- **Where the numbers come from.** Raw foods, fruit, vegetables and nuts use typical USDA and IFCT values. Cooked dishes in the recipe table are calculated from their ingredients plus salt (about 0.8% of the dish by weight, none for millet rotis). Other prepared and packaged foods use typical Indian values and vary by brand. All of these are `reference` values entered by hand: they are not individually verified against USDA, so treat them as estimates. Plain foods such as rice are listed without added salt.
+- **Added sugar means free sugars** (WHO): table sugar, jaggery, honey, syrups and the sugars in juices. Sugar inside whole fruit, vegetables and milk is not counted.
+- **Salt in cooking notes.** "no salt", "low salt" (half the usual), "extra salt" (1.5 times), or an amount ("1/2 tsp salt", "a pinch of salt", "1 tsp extra salt") change the sodium of recipe dishes. Salt added at the table, and dishes the app cannot look up, are not counted, so sodium is a floor and the real intake can be higher.
+- **AI estimates are checked.** Foods the table does not know can come back with these values from the AI. Missing or invalid values become "no data", saturated fat is capped at total fat, added sugar at total carbs, and a sodium figure that is more than pure salt for that amount is discarded.
+- **Daily limits** are ceilings to stay under, not goals. They follow age and conditions, and the stricter limit wins: sodium under 2,000 mg (WHO; 1,800 mg at age 13; 1,500 mg with high blood pressure), saturated fat under 10% of calories (6% with high cholesterol), added sugar under 10% of calories (5% with type 2 diabetes or PCOS, at most 25 g under 18). They are general guidance, not medical advice. People with kidney disease or heart failure need limits set by their doctor, and the app does not set them.
+- **Database upgrade.** The first start after updating adds four columns to `meals` (`sodium_mg`, `added_sugar`, `sat_fat`, `nutrient_gaps`) and sets `PRAGMA user_version = 1`. Existing rows are kept and get no data. Before changing an existing database file, a copy is saved next to it as `nutrisense.db.before-v1`. To undo the upgrade, stop the server and put that copy back.
+
 ## Meal logging and review
 
 Describe a meal, attach a photo, or do both. NutriSense lists the foods it found, and nothing is saved until you press **Log**.
@@ -69,6 +81,6 @@ npm test      # unit and API tests (mock AI servers, in-memory DB)
 ## Notes and limits
 
 - Profile and pantry details are sent to Gemini/Groq when you use an AI feature.
-- No micronutrient (vitamin/mineral) tracking and no barcode scanning yet. Progress shows only what is actually tracked.
+- Only sodium is tracked among minerals (no potassium, iron, calcium or vitamins) and there is no barcode scanning yet. Progress shows only what is actually tracked.
 - The units and reminder settings are saved, but display is metric/kcal and reminders are not delivered (no notification service).
 - General nutrition guidance, not medical advice.

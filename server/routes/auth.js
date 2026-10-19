@@ -42,12 +42,16 @@ async function createDemoUser(today) {
     }
     const weights = [[-21, 69.4], [-14, 68.9], [-7, 68.4], [-3, 68.2], [0, 68]];
     for (const [d, kg] of weights) q.run('INSERT OR REPLACE INTO weight_logs (user_id, date, kg) VALUES (?,?,?)', id, addDays(today, d), kg);
+    // [day offset, type, name, kcal, protein, carbs, fat, fiber, sodium mg, saturated fat g, added sugar g]
+    // The protein shake has null (no data) on purpose, so the demo shows how missing data differs from zero.
     const meals = [
-      [-1, 'breakfast', 'Oats with milk', 310, 12, 46, 8, 6], [-1, 'lunch', 'Dal, rice and salad', 520, 20, 85, 9, 9], [-1, 'dinner', 'Paneer bhurji with 2 rotis', 540, 26, 52, 24, 7],
-      [0, 'breakfast', 'Vegetable poha', 330, 8, 58, 8, 4], [0, 'lunch', 'Rajma and rice', 560, 21, 92, 10, 12]
+      [-1, 'breakfast', 'Oats with milk', 310, 12, 46, 8, 6, 70, 2.4, 0], [-1, 'lunch', 'Dal, rice and salad', 520, 20, 85, 9, 9, 760, 3.2, 0],
+      [-1, 'dinner', 'Paneer bhurji with 2 rotis', 540, 26, 52, 24, 7, 950, 11, 0],
+      [0, 'breakfast', 'Vegetable poha', 330, 8, 58, 8, 4, 520, 1.8, 2], [0, 'lunch', 'Rajma and rice', 560, 21, 92, 10, 12, 780, 2.4, 0],
+      [0, 'snack', 'Packaged protein shake', 160, 24, 8, 3, 0, null, null, null]
     ];
-    for (const [d, type, name, kcal, p, c, f, fib] of meals) {
-      q.run('INSERT INTO meals (user_id, date, meal_type, name, kcal, protein, carbs, fat, fiber, source) VALUES (?,?,?,?,?,?,?,?,?,?)', id, addDays(today, d), type, name, kcal, p, c, f, fib, 'manual');
+    for (const [d, type, name, kcal, p, c, f, fib, na, sat, sug] of meals) {
+      q.run('INSERT INTO meals (user_id, date, meal_type, name, kcal, protein, carbs, fat, fiber, sodium_mg, sat_fat, added_sugar, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', id, addDays(today, d), type, name, kcal, p, c, f, fib, na, sat, sug, 'manual');
     }
     q.run('INSERT OR REPLACE INTO water_logs (user_id, date, glasses) VALUES (?,?,?)', id, today, 3);
     return { id, name: 'Demo Guest', email: `guest-${suffix}@${GUEST_DOMAIN}` };

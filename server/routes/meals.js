@@ -1,7 +1,8 @@
 import { q, tx } from '../lib/db.js';
 import { HttpError, bad, num, oneOf, rateLimit, str } from '../lib/http.js';
 import { dateOr } from '../lib/dates.js';
-import { dayTotals, getPantry, getProfile, matchPantry } from '../lib/data.js';
+import { dayTotals, getPantry, getProfile, matchPantry, watchFor } from '../lib/data.js';
+import { WATCH, gapMask } from '../lib/limits.js';
 import { analyzeMeal, analyzePhoto, estimateItems } from '../lib/ai/features.js';
 import { findFood, estimateGrams } from '../lib/foods.js';
 
@@ -22,6 +23,25 @@ function deductionFor(entry, pantry) {
   if (amount <= 0) return null;
   amount = Math.min(amount, item.quantity);
   return { item_id: item.id, name: item.name, amount, unit: item.unit };
+}
+
+const WATCH_MAX = { sodium_mg: 30000, sat_fat: 400, added_sugar: 1500 };
+
+/**
+ * Reads the optional sodium, saturated fat and added sugar of a meal. Blank or missing means "no data" (null);
+ * 0 means a real zero. Values that cannot be true are refused.
+ */
+function readWatch(b, meal) {
+  const out = {};
+  for (const w of WATCH) {
+    const v = num(b[w.key], { min: 0, max: WATCH_MAX[w.key], field: w.label, optional: true });
+    out[w.key] = v == null ? null : w.key === 'sodium_mg' ? Math.round(v) : Math.round(v * 10) / 10;
+  }
+  if (out.sat_fat != null && out.sat_fat > meal.fat + 0.2) throw bad('Saturated fat cannot be more than total fat.');
+  if (out.added_sugar != null && out.added_sugar > meal.carbs + 0.2) throw bad('Added sugar cannot be more than total carbs.');
+  // Which stored values are only a lower bound because a food in the meal had no data.
+  out.nutrient_gaps = gapMask(b.gaps) & WATCH.reduce((m, w) => (out[w.key] != null ? m | w.bit : m), 0);
+  return out;
 }
 
 const clip = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -66,7 +86,8 @@ export function register(router) {
   router.add('GET', '/api/meals', async (ctx) => {
     const date = dateOr(ctx.query.date);
     const meals = q.all('SELECT * FROM meals WHERE user_id = ? AND date = ? ORDER BY id', ctx.user.id, date);
-    return { date, meals, totals: dayTotals(ctx.user.id, date) };
+    const totals = dayTotals(ctx.user.id, date);
+    return { date, meals, totals, watch: watchFor(getProfile(ctx.user.id), totals) };
   });
 
   router.add('POST', '/api/meals', async (ctx) => {
@@ -83,13 +104,15 @@ export function register(router) {
       fiber: num(b.fiber ?? 0, { min: 0, max: 150, field: 'Fiber' }),
       source: ['manual', 'ai', 'local', 'photo', 'recipe'].includes(b.source) ? b.source : 'manual'
     };
+    const watch = readWatch(b, meal);
     const deductions = Array.isArray(b.deductions) ? b.deductions.slice(0, 30) : [];
     let id;
     const used = [];
     tx(() => {
       const r = q.run(
-        'INSERT INTO meals (user_id, date, meal_type, name, serving, kcal, protein, carbs, fat, fiber, source) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-        ctx.user.id, date, meal.meal_type, meal.name, meal.serving, meal.kcal, meal.protein, meal.carbs, meal.fat, meal.fiber, meal.source
+        'INSERT INTO meals (user_id, date, meal_type, name, serving, kcal, protein, carbs, fat, fiber, sodium_mg, sat_fat, added_sugar, nutrient_gaps, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        ctx.user.id, date, meal.meal_type, meal.name, meal.serving, meal.kcal, meal.protein, meal.carbs, meal.fat, meal.fiber,
+        watch.sodium_mg, watch.sat_fat, watch.added_sugar, watch.nutrient_gaps, meal.source
       );
       id = Number(r.lastInsertRowid);
       for (const d of deductions) {
@@ -101,14 +124,16 @@ export function register(router) {
       }
     });
     ctx.status = 201;
-    return { meal: q.get('SELECT * FROM meals WHERE id = ?', id), totals: dayTotals(ctx.user.id, date), deducted: used };
+    const totals = dayTotals(ctx.user.id, date);
+    return { meal: q.get('SELECT * FROM meals WHERE id = ?', id), totals, watch: watchFor(getProfile(ctx.user.id), totals), deducted: used };
   });
 
   router.add('DELETE', '/api/meals/:id', async (ctx) => {
     const row = q.get('SELECT * FROM meals WHERE id = ? AND user_id = ?', Number(ctx.params.id), ctx.user.id);
     if (!row) throw new HttpError(404, 'Meal not found.');
     q.run('DELETE FROM meals WHERE id = ?', row.id);
-    return { ok: true, totals: dayTotals(ctx.user.id, row.date) };
+    const totals = dayTotals(ctx.user.id, row.date);
+    return { ok: true, totals, watch: watchFor(getProfile(ctx.user.id), totals) };
   });
 
   // Analyses text, a photo, or both. Nothing is saved: the user reviews and edits, then logs with POST /api/meals.

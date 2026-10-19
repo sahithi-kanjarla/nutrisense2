@@ -4,9 +4,12 @@
  *   - 'usda-checked': compared with USDA FoodData Central (SR Legacy) and found within a few percent.
  *   - 'reference':    typical published values entered by hand; reasonable, but not individually verified.
  *   - 'calculated':   cooked dishes computed from ingredient quantities (see addRecipe below).
+ * Sodium, saturated fat and added sugar (per 100 g, null = no data) are in food-nutrients.js.
  * It is used when an AI key is missing or the AI call fails, to price cooking fat and ingredient
  * changes exactly, and to give pantry items nutrition data without spending AI quota.
  */
+
+import { NUTRIENTS, SODIUM_MG_PER_G_SALT } from './food-nutrients.js';
 
 const FOODS = [];
 function add(name, aliases, kcal, protein, carbs, fat, fiber, opts = {}) {
@@ -20,7 +23,8 @@ function add(name, aliases, kcal, protein, carbs, fat, fiber, opts = {}) {
     source: opts.source || 'reference',
     twin: opts.twin || null,      // cooked / ready version used when logging meals
     unit: opts.unit || 'g',
-    ready: Boolean(opts.ready)    // already cooked or ready to eat
+    ready: Boolean(opts.ready),   // already cooked or ready to eat
+    sodium_mg: null, sat_fat: null, added_sugar: null // filled from food-nutrients.js; null = no data (not zero)
   });
 }
 
@@ -131,7 +135,8 @@ add('fish', ['rohu', 'salmon', 'tuna', 'basa', 'pomfret', 'fish fry', 'fish curr
 add('prawns', ['shrimp', 'prawn'], 99, 24, 0.2, 0.3, 0);
 
 // Fats, sugars and other
-add('cooking oil', ['oil', 'sunflower oil', 'mustard oil', 'olive oil', 'coconut oil', 'groundnut oil', 'refined oil'], 813, 0, 0, 92, 0, { unit: 'ml' }); // per 100 ml: oil weighs 0.92 g/ml (884 kcal per 100 g)
+add('cooking oil', ['oil', 'sunflower oil', 'mustard oil', 'olive oil', 'groundnut oil', 'refined oil'], 813, 0, 0, 92, 0, { unit: 'ml' });
+add('coconut oil', [], 813, 0, 0, 92, 0, { unit: 'ml' }); // per 100 ml: oil weighs 0.92 g/ml (884 kcal per 100 g)
 add('sugar', ['cheeni', 'white sugar'], 387, 0, 100, 0, 0, { spoon: [4.2, 12.5] });
 add('jaggery', ['gur'], 383, 0.4, 98, 0.1, 0);
 add('honey', [], 304, 0.3, 82, 0, 0.2, { spoon: [7, 21] });
@@ -174,25 +179,42 @@ add('cola', ['soft drink', 'soda', 'coke', 'pepsi'], 42, 0, 10.6, 0, 0, { unit: 
 add('fruit juice', ['orange juice', 'packaged juice', 'mango juice'], 48, 0.6, 11.5, 0.2, 0.2, { unit: 'ml', ready: true });
 add('sugarcane juice', ['ganne ka ras'], 55, 0, 14, 0, 0, { unit: 'ml', ready: true });
 
+// Sodium, saturated fat and added sugar (see food-nutrients.js). Recipes below are built from these.
+for (const [name, [sodium, satFat, addedSugar]] of Object.entries(NUTRIENTS)) {
+  const food = FOODS.find((f) => f.name === name);
+  if (!food) throw new Error(`food-nutrients.js lists an unknown food: ${name}`);
+  food.sodium_mg = sodium; food.sat_fat = satFat; food.added_sugar = addedSugar;
+}
+
 /* ------------------------------ Recipes: dishes calculated from ingredients ------------------------------ */
 
 // Nutrition of cooking fat per gram of fat or oil.
 export const FAT_SOURCES = {
-  oil: { kcal: 8.84, protein: 0, carbs: 0, fat: 1, perTsp: 4.6, label: 'oil' },
-  ghee: { kcal: 9.0, protein: 0, carbs: 0, fat: 1, perTsp: 4.5, label: 'ghee' },
-  butter: { kcal: 7.17, protein: 0.009, carbs: 0.001, fat: 0.81, perTsp: 4.7, label: 'butter' }
+  oil: { kcal: 8.84, protein: 0, carbs: 0, fat: 1, sat: 0.14, sodium: 0, perTsp: 4.6, label: 'oil' },
+  coconut: { kcal: 8.84, protein: 0, carbs: 0, fat: 1, sat: 0.85, sodium: 0, perTsp: 4.6, label: 'coconut oil' },
+  ghee: { kcal: 9.0, protein: 0, carbs: 0, fat: 1, sat: 0.62, sodium: 0.02, perTsp: 4.5, label: 'ghee' },
+  butter: { kcal: 7.17, protein: 0.009, carbs: 0.001, fat: 0.81, sat: 0.51, sodium: 6, perTsp: 4.7, label: 'butter' }
 };
 
-const ZERO = () => ({ kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 });
-const addVec = (a, b, k = 1) => ({ kcal: a.kcal + b.kcal * k, protein: a.protein + b.protein * k, carbs: a.carbs + b.carbs * k, fat: a.fat + b.fat * k, fiber: a.fiber + (b.fiber || 0) * k });
+const KEYS = ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sodium_mg', 'sat_fat', 'added_sugar'];
+const ZERO = () => Object.fromEntries(KEYS.map((k) => [k, 0]));
+// A nutrient with no data stays null all the way through a sum: unknown plus a number is unknown, never a number.
+const plus = (a, b) => (a == null || b == null ? null : a + b);
+const times = (v, k) => (v == null ? null : v * k);
+const addVec = (a, b, k = 1) => Object.fromEntries(KEYS.map((key) => [key, plus(a[key], times(b[key] ?? (key === 'fiber' ? 0 : null), k))]));
 const foodByName = (name) => FOODS.find((f) => f.name === name);
-const grams = (food, g) => { const k = g / 100; return { kcal: food.kcal * k, protein: food.protein * k, carbs: food.carbs * k, fat: food.fat * k, fiber: food.fiber * k }; };
-const fatVec = (type, g) => { const f = FAT_SOURCES[type]; return { kcal: f.kcal * g, protein: f.protein * g, carbs: f.carbs * g, fat: f.fat * g, fiber: 0 }; };
+const grams = (food, g) => Object.fromEntries(KEYS.map((key) => [key, times(food[key], g / 100)]));
+const fatVec = (type, g) => {
+  const f = FAT_SOURCES[type];
+  return { kcal: f.kcal * g, protein: f.protein * g, carbs: f.carbs * g, fat: f.fat * g, fiber: 0, sodium_mg: f.sodium * g, sat_fat: f.sat * g, added_sugar: 0 };
+};
+/** Sodium in `g` grams of table salt. */
+export const saltSodium = (g) => g * SODIUM_MG_PER_G_SALT;
 
 /**
  * Computes the nutrition of a recipe per 100 g of the finished dish.
- * spec: { ingredients: [[foodName, rawGrams], ...], fat: [type, grams] | null, yield: grams of finished dish, flour?: name of the flour ingredient }
- * overrides: { fat: [type, gramsForWholeYield] | null, flours: [{ food, share }] }
+ * spec: { ingredients: [[foodName, rawGrams], ...], fat: [type, grams] | null, salt: grams of salt, yield: grams of finished dish, flour?: name of the flour ingredient }
+ * overrides: { fat: [type, gramsForWholeYield] | null, salt: gramsForWholeYield, flours: [{ food, share }] }
  */
 export function composeRecipe(spec, overrides = {}) {
   let total = ZERO();
@@ -207,37 +229,43 @@ export function composeRecipe(spec, overrides = {}) {
   }
   const fat = overrides.fat !== undefined ? overrides.fat : spec.fat;
   if (fat) total = addVec(total, fatVec(fat[0], fat[1]));
+  const salt = overrides.salt !== undefined ? overrides.salt : (spec.salt || 0);
+  if (total.sodium_mg != null) total.sodium_mg += saltSodium(salt);
   const k = 100 / spec.yield;
-  return { kcal: total.kcal * k, protein: total.protein * k, carbs: total.carbs * k, fat: total.fat * k, fiber: total.fiber * k };
+  return Object.fromEntries(KEYS.map((key) => [key, times(total[key], k)]));
 }
 
 function addRecipe(name, aliases, spec, opts = {}) {
   const v = composeRecipe(spec);
-  const r1 = (x) => Math.round(x * 10) / 10;
+  const r1 = (x) => (x == null ? null : Math.round(x * 10) / 10);
   add(name, aliases, Math.round(v.kcal), r1(v.protein), r1(v.carbs), r1(v.fat), r1(v.fiber), { ...opts, ready: true, source: 'calculated' });
-  FOODS[FOODS.length - 1].recipe = spec;
+  const food = FOODS[FOODS.length - 1];
+  food.recipe = spec;
+  food.sodium_mg = v.sodium_mg == null ? null : Math.round(v.sodium_mg);
+  food.sat_fat = r1(v.sat_fat);
+  food.added_sugar = r1(v.added_sugar);
 }
 
 // Quantities are for one typical serving or piece; "yield" is the weight of the finished dish.
-addRecipe('roti', ['chapati', 'phulka', 'fulka', 'chapatti'], { ingredients: [['atta', 30]], fat: ['ghee', 1.5], yield: 40, flour: 'atta' }, { gpp: 40 });
+addRecipe('roti', ['chapati', 'phulka', 'fulka', 'chapatti'], { ingredients: [['atta', 30]], fat: ['ghee', 1.5], salt: 0.3, yield: 40, flour: 'atta' }, { gpp: 40 });
 addRecipe('jowar roti', ['jowar bhakri', 'jwari roti'], { ingredients: [['jowar flour', 30]], fat: null, yield: 40, flour: 'jowar flour' }, { gpp: 40 });
 addRecipe('bajra roti', ['bajra bhakri'], { ingredients: [['bajra flour', 35]], fat: null, yield: 50, flour: 'bajra flour' }, { gpp: 50 });
 addRecipe('ragi roti', ['ragi mudde', 'nachni roti'], { ingredients: [['ragi flour', 30]], fat: null, yield: 45, flour: 'ragi flour' }, { gpp: 45 });
-addRecipe('paratha', ['plain paratha'], { ingredients: [['atta', 45]], fat: ['oil', 5], yield: 65, flour: 'atta' }, { gpp: 65 });
-addRecipe('aloo paratha', ['stuffed paratha'], { ingredients: [['atta', 40], ['potato', 40]], fat: ['oil', 6], yield: 90, flour: 'atta' }, { gpp: 90 });
-addRecipe('puri', ['poori'], { ingredients: [['atta', 25]], fat: ['oil', 4.5], yield: 35, flour: 'atta' }, { gpp: 35 });
-addRecipe('dosa', ['plain dosa', 'masala dosa'], { ingredients: [['rice', 22], ['urad dal', 7]], fat: ['oil', 3], yield: 80 }, { gpp: 80 });
-addRecipe('idli', ['idly'], { ingredients: [['rice', 13], ['urad dal', 4.5]], fat: null, yield: 40 }, { gpp: 40 });
-addRecipe('cooked poha', ['vegetable poha', 'kanda poha', 'poha cooked'], { ingredients: [['poha', 40], ['onion', 25], ['potato', 20], ['peanuts', 5]], fat: ['oil', 5], yield: 170 });
-addRecipe('upma', ['rava upma', 'suji upma'], { ingredients: [['suji', 50], ['onion', 20], ['carrot', 20]], fat: ['oil', 6], yield: 200 });
-addRecipe('dal cooked', ['dal', 'daal', 'dal tadka', 'tadka dal', 'cooked dal', 'lentil soup', 'dal fry', 'sambar dal'], { ingredients: [['toor dal', 35], ['onion', 15], ['tomato', 25]], fat: ['ghee', 5], yield: 180 }, { katori: 150 });
-addRecipe('mixed vegetables', ['mixed veg', 'sabzi', 'vegetable curry', 'veg curry', 'sabji'], { ingredients: [['potato', 40], ['cauliflower', 60], ['green peas', 30], ['onion', 20], ['tomato', 30]], fat: ['oil', 6], yield: 170 }, { katori: 120 });
-addRecipe('paneer bhurji', ['bhurji paneer'], { ingredients: [['paneer', 80], ['onion', 25], ['tomato', 30]], fat: ['oil', 5], yield: 140 });
-addRecipe('egg bhurji', ['anda bhurji'], { ingredients: [['egg', 100], ['onion', 20]], fat: ['oil', 5], yield: 115 });
-addRecipe('khichdi', ['dal khichdi', 'moong khichdi', 'khichri'], { ingredients: [['rice', 25], ['moong dal', 25], ['carrot', 20]], fat: ['ghee', 4.5], yield: 250 });
-addRecipe('pulao', ['veg pulao', 'vegetable pulao', 'pulav'], { ingredients: [['rice', 55], ['green peas', 25], ['carrot', 15], ['onion', 15]], fat: ['oil', 5], yield: 220 });
-addRecipe('jeera rice', [], { ingredients: [['rice', 36]], fat: ['ghee', 3], yield: 100 });
-addRecipe('pakora', ['pakoda', 'bhajiya', 'onion pakora', 'bhaji'], { ingredients: [['besan', 10], ['onion', 10]], fat: ['oil', 3.5], yield: 25 }, { gpp: 25 });
+addRecipe('paratha', ['plain paratha'], { ingredients: [['atta', 45]], fat: ['oil', 5], salt: 0.6, yield: 65, flour: 'atta' }, { gpp: 65 });
+addRecipe('aloo paratha', ['stuffed paratha'], { ingredients: [['atta', 40], ['potato', 40]], fat: ['oil', 6], salt: 1, yield: 90, flour: 'atta' }, { gpp: 90 });
+addRecipe('puri', ['poori'], { ingredients: [['atta', 25]], fat: ['oil', 4.5], salt: 0.3, yield: 35, flour: 'atta' }, { gpp: 35 });
+addRecipe('dosa', ['plain dosa', 'masala dosa'], { ingredients: [['rice', 22], ['urad dal', 7]], fat: ['oil', 3], salt: 0.5, yield: 80 }, { gpp: 80 });
+addRecipe('idli', ['idly'], { ingredients: [['rice', 13], ['urad dal', 4.5]], fat: null, salt: 0.3, yield: 40 }, { gpp: 40 });
+addRecipe('cooked poha', ['vegetable poha', 'kanda poha', 'poha cooked'], { ingredients: [['poha', 40], ['onion', 25], ['potato', 20], ['peanuts', 5]], fat: ['oil', 5], salt: 1.3, yield: 170 });
+addRecipe('upma', ['rava upma', 'suji upma'], { ingredients: [['suji', 50], ['onion', 20], ['carrot', 20]], fat: ['oil', 6], salt: 1.6, yield: 200 });
+addRecipe('dal cooked', ['dal', 'daal', 'dal tadka', 'tadka dal', 'cooked dal', 'lentil soup', 'dal fry', 'sambar dal'], { ingredients: [['toor dal', 35], ['onion', 15], ['tomato', 25]], fat: ['ghee', 5], salt: 1.5, yield: 180 }, { katori: 150 });
+addRecipe('mixed vegetables', ['mixed veg', 'sabzi', 'vegetable curry', 'veg curry', 'sabji'], { ingredients: [['potato', 40], ['cauliflower', 60], ['green peas', 30], ['onion', 20], ['tomato', 30]], fat: ['oil', 6], salt: 1.3, yield: 170 }, { katori: 120 });
+addRecipe('paneer bhurji', ['bhurji paneer'], { ingredients: [['paneer', 80], ['onion', 25], ['tomato', 30]], fat: ['oil', 5], salt: 1.1, yield: 140 });
+addRecipe('egg bhurji', ['anda bhurji'], { ingredients: [['egg', 100], ['onion', 20]], fat: ['oil', 5], salt: 0.9, yield: 115 });
+addRecipe('khichdi', ['dal khichdi', 'moong khichdi', 'khichri'], { ingredients: [['rice', 25], ['moong dal', 25], ['carrot', 20]], fat: ['ghee', 4.5], salt: 2, yield: 250 });
+addRecipe('pulao', ['veg pulao', 'vegetable pulao', 'pulav'], { ingredients: [['rice', 55], ['green peas', 25], ['carrot', 15], ['onion', 15]], fat: ['oil', 5], salt: 1.8, yield: 220 });
+addRecipe('jeera rice', [], { ingredients: [['rice', 36]], fat: ['ghee', 3], salt: 0.8, yield: 100 });
+addRecipe('pakora', ['pakoda', 'bhajiya', 'onion pakora', 'bhaji'], { ingredients: [['besan', 10], ['onion', 10]], fat: ['oil', 3.5], salt: 0.25, yield: 25 }, { gpp: 25 });
 
 export const FOOD_TABLE = FOODS;
 
@@ -268,7 +296,7 @@ export function findFood(text, context = 'pantry') {
 
 /* ------------------------------ Quantities ------------------------------ */
 
-function simplifyFractions(text) {
+export function simplifyFractions(text) {
   const half = { '½': 0.5, '¼': 0.25, '¾': 0.75 };
   return String(text || '')
     .replace(/(\d+)\s*([½¼¾])/g, (_, w, f) => String(Number(w) + half[f]))
@@ -329,7 +357,11 @@ export function estimateGrams(rawText, food) {
 export function nutritionFor(food, grams) {
   const k = grams / 100;
   const r = (v) => Math.round(v * k * 10) / 10;
-  return { kcal: Math.round(food.kcal * k), protein: r(food.protein), carbs: r(food.carbs), fat: r(food.fat), fiber: r(food.fiber) };
+  const opt = (v, digits) => (v == null ? null : digits === 0 ? Math.round(v * k) : r(v));
+  return {
+    kcal: Math.round(food.kcal * k), protein: r(food.protein), carbs: r(food.carbs), fat: r(food.fat), fiber: r(food.fiber),
+    sodium_mg: opt(food.sodium_mg, 0), sat_fat: opt(food.sat_fat, 1), added_sugar: opt(food.added_sugar, 1)
+  };
 }
 
 export function per100(food) {
