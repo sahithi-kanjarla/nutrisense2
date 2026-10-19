@@ -19,7 +19,7 @@ export default async function dashboard(root) {
     <a class="btn primary" data-link href="/meals">${icon('plus')}Log a meal</a></div>
   <div class="card hero">
     ${ring({ value: tot.kcal, max: t.calories, size: 170, label: num(Math.abs(left)), sub: left >= 0 ? 'kcal left' : 'kcal over' })}
-    <div class="macros">${macro('Protein', tot.protein, t.protein, 'var(--green)')}${macro('Carbs', tot.carbs, t.carbs, 'var(--amber)')}${macro('Fats', tot.fat, t.fat, 'var(--rust)')}${macro('Fiber', tot.fiber, t.fiber, 'var(--teal)')}
+    <div class="macros">${macro(d.clinical ? 'Protein (ceiling)' : 'Protein', tot.protein, t.protein, 'var(--green)')}${macro('Carbs', tot.carbs, t.carbs, 'var(--amber)')}${macro('Fats', tot.fat, t.fat, 'var(--rust)')}${macro('Fiber', tot.fiber, t.fiber, 'var(--teal)')}
       <div class="small muted">${num(tot.kcal)} of ${num(t.calories)} kcal eaten</div></div>
   </div>
   <div class="grid4" style="margin-top:20px">
@@ -38,8 +38,10 @@ export default async function dashboard(root) {
       <div class="card" id="watch"><div class="card-h"><h3>Watch list</h3><span class="small muted right">stay under</span></div>${d.meals.length ? watchRows(d.watch) : html`<p class="muted small">Sodium, saturated fat and added sugar appear here once you log a meal.</p>`}</div>
     </div>
     <div>
-      <div class="card"><div class="card-h"><h3>Water</h3><span class="tag right">${d.water.glasses} / ${d.water.goal} glasses</span></div>
-        <div class="glasses" id="glasses">${Array.from({ length: d.water.goal }, (_, i) => html`<button class="glass ${i < d.water.glasses ? 'on' : ''}" data-n="${i + 1}" aria-label="${i + 1} glasses" aria-pressed="${i < d.water.glasses}"></button>`)}</div></div>
+      ${d.water.managed
+        ? html`<div class="card"><div class="card-h"><h3>Fluids</h3></div><p class="small muted">${d.water.limit_ml ? `Your care team's limit is ${num(d.water.limit_ml)} ml a day.` : 'We do not set a water target for you, because your care team may want to limit fluids. Please ask them how much to drink.'}</p></div>`
+        : html`<div class="card"><div class="card-h"><h3>Water</h3><span class="tag right">${d.water.glasses} / ${d.water.goal} glasses</span></div>
+        <div class="glasses" id="glasses">${Array.from({ length: d.water.goal }, (_, i) => html`<button class="glass ${i < d.water.glasses ? 'on' : ''}" data-n="${i + 1}" aria-label="${i + 1} glasses" aria-pressed="${i < d.water.glasses}"></button>`)}</div></div>`}
       <div class="card"><div class="card-h"><h3>Use soon</h3></div>
         ${d.expiring.length ? html`<div class="list">${d.expiring.map((i) => html`<div class="item"><div class="grow"><b>${i.name}</b><span class="small muted">${num(i.quantity)} ${i.unit}</span></div><span class="tag amber">${i.days_left <= 0 ? 'today' : i.days_left === 1 ? 'tomorrow' : `${i.days_left} days`}</span></div>`)}</div>`
           : html`<p class="muted small">Nothing is about to expire. Nice work.</p>`}</div>
@@ -49,7 +51,7 @@ export default async function dashboard(root) {
     </div>
   </div>`);
 
-  $('#glasses').onclick = async (e) => {
+  if ($('#glasses')) $('#glasses').onclick = async (e) => {
     const g = e.target.closest('.glass'); if (!g) return;
     let n = Number(g.dataset.n);
     if (n === d.water.glasses) n -= 1;

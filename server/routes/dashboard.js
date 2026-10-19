@@ -3,7 +3,7 @@ import { bad, num } from '../lib/http.js';
 import { computePlan, isAutoPlan } from '../lib/plan.js';
 import { addDays, dateOr, dateRange, todayStr } from '../lib/dates.js';
 import { dayTotals, getPantry, getProfile, remainingOf, targetsOf, watchFor } from '../lib/data.js';
-import { limitsOf, WATCH } from '../lib/limits.js';
+import { clinicalOf, limitsOf, WATCH } from '../lib/limits.js';
 import { perDay, rangeStats } from '../lib/stats.js';
 
 function streakFor(userId, date) {
@@ -33,8 +33,9 @@ export function register(router) {
       totals,
       remaining: remainingOf(targets, totals),
       watch: watchFor(profile, totals),
+      clinical: clinicalOf(profile),
       meals: q.all('SELECT * FROM meals WHERE user_id = ? AND date = ? ORDER BY id', ctx.user.id, date),
-      water: { glasses: waterFor(ctx.user.id, date), goal: targets.water_glasses },
+      water: { glasses: waterFor(ctx.user.id, date), goal: targets.water_glasses, managed: (profile.conditions || []).includes('clin'), limit_ml: profile.rx_fluid_ml ?? null },
       streak: streakFor(ctx.user.id, date),
       week,
       week_on_target: withinTenPct,
@@ -117,7 +118,7 @@ export function register(router) {
     });
 
     return {
-      date, days, targets, watch: watchAvg,
+      date, days, targets, watch: watchAvg, clinical: clinicalOf(profile),
       weight: { series: weights, current: latest?.kg ?? profile.weight_kg, goal: profile.target_weight_kg, change: stats.weight_change },
       avg: a, split, coverage, calendar: cal,
       logged_days: stats.logged_days, protein_hits: stats.protein_hits, kcal_on_target: stats.kcal_on_target

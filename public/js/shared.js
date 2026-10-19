@@ -18,8 +18,13 @@ export const ALLERGIES = [
 ];
 export const CONDITIONS = [
   ['t2', 'Diabetes or pre-diabetes'], ['bp', 'High blood pressure'], ['chol', 'High cholesterol'], ['thy', 'Thyroid condition'],
-  ['pcos', 'PCOS'], ['gut', 'Digestive condition'], ['preg', 'Pregnant or breastfeeding']
+  ['pcos', 'PCOS'], ['gut', 'Digestive condition'], ['preg', 'Pregnant or breastfeeding'],
+  ['clin', 'Kidney disease, heart failure or another condition my doctor manages']
 ];
+export const PREG_STAGES = [['', 'Not sure yet'], ['t1', 'First trimester'], ['t2', 'Second trimester'], ['t3', 'Third trimester'], ['bf', 'Breastfeeding']];
+
+/** When to see a professional. Shown with every plan, and kept short on purpose. */
+export const CARE_NOTE = 'These numbers are estimates from a standard equation. They are general guidance, not medical advice. Please see a doctor or registered dietitian if you are pregnant or breastfeeding, under 18, take medicines, live with kidney, heart, diabetes or another condition, have had an eating disorder, or are gaining or losing weight quickly without trying.';
 export const QUICK = [
   ['rice', 'Rice'], ['atta', 'Atta'], ['toor', 'Toor dal'], ['moong', 'Moong dal'], ['chana', 'Kabuli chana'], ['rajma', 'Rajma'],
   ['oats', 'Oats'], ['eggs', 'Eggs'], ['paneer', 'Paneer'], ['curd', 'Curd'], ['milk', 'Milk'], ['tofu', 'Tofu'],
@@ -29,12 +34,61 @@ export const label = (list, key) => (list.find((x) => x[0] === key) || [0, key])
 
 export const MEAL_TYPES = ['breakfast', 'lunch', 'snack', 'dinner'];
 
-export const planSummary = (p) => html`<div class="plan-box">
+const bmiText = (p) => {
+  const b = p.bmi_bands;
+  if (!b) return `BMI ${p.bmi}`;
+  return b.applies ? `BMI ${p.bmi} (${b.who} on the WHO scale, ${b.south_asian} on the South Asian scale)` : `BMI ${p.bmi}`;
+};
+
+export const planSummary = (p) => {
+  const water = p.fluid_managed ? ['Fluids', p.fluid_limit_ml ? num(p.fluid_limit_ml) : 'ask care team', p.fluid_limit_ml ? 'ml limit' : ''] : ['Water', p.water_glasses, 'glasses'];
+  const protein = p.clinician_managed ? ['Protein (ceiling)', p.protein, 'g'] : ['Protein', p.protein, 'g'];
+  return html`<div class="plan-box">
   <div class="row between wrap"><div><span class="muted small">Your daily target</span><div><b class="big">${num(p.calories)}</b> <span class="muted">kcal</span></div></div>
-    <div class="row wrap" style="gap:18px">${[['Protein', p.protein, 'g'], ['Carbs', p.carbs, 'g'], ['Fats', p.fat, 'g'], ['Fiber', p.fiber, 'g'], ['Water', p.water_glasses, 'glasses']]
-      .map(([l, v, u]) => html`<div><b style="font:700 20px 'Bricolage Grotesque'">${num(v)}</b> <span class="small muted">${u}</span><div class="small muted">${l}</div></div>`)}</div></div>
-  <p class="small muted" style="margin-top:12px">BMR ${num(p.bmr)} kcal · maintenance ${num(p.tdee)} kcal · BMI ${p.bmi}${p.weeks_to_goal ? ` · about ${p.weeks_to_goal} weeks to your goal at ${p.kg_per_week} kg a week` : ''}</p>
-  ${(p.notes || []).map((n) => html`<div class="notice warn" style="margin-top:10px">${icon('alert')}<div>${n}</div></div>`)}</div>`;
+    <div class="row wrap" style="gap:18px">${[protein, ['Carbs', p.carbs, 'g'], ['Fats', p.fat, 'g'], ['Fiber', p.fiber, 'g'], water]
+      .map(([l, v, u]) => html`<div><b style="font:700 20px 'Bricolage Grotesque'">${typeof v === 'number' ? num(v) : v}</b> <span class="small muted">${u}</span><div class="small muted">${l}</div></div>`)}</div></div>
+  <p class="small muted" style="margin-top:12px">BMR ${num(p.bmr)} kcal · maintenance ${num(p.tdee)} kcal · ${bmiText(p)}${p.weeks_to_goal ? ` · about ${p.weeks_to_goal} weeks or more to your goal` : ''}</p>
+  ${p.bmi_bands?.note ? html`<p class="small muted" style="margin-top:6px">${p.bmi_bands.note}</p>` : ''}
+  ${p.timeline_note ? html`<p class="small muted" style="margin-top:6px">${p.timeline_note}</p>` : ''}
+  ${(p.notes || []).map((n) => html`<div class="notice warn" style="margin-top:10px">${icon('alert')}<div>${n}</div></div>`)}
+  <p class="small muted" style="margin-top:12px">${CARE_NOTE}</p></div>`;
+};
+
+/* ------------------------------ Pregnancy stage and limits from a care team ------------------------------ */
+
+/** Draws the extra fields a condition needs into `host`, and keeps `ex` up to date as the user types. */
+export function mountCondExtras(host, getConds, ex) {
+  const draw = () => {
+    const c = getConds();
+    const parts = [];
+    if (c.includes('preg')) {
+      parts.push(html`<div class="field"><label class="f" for="x-stage">Where are you?</label>
+        <select class="input" id="x-stage">${PREG_STAGES.map(([k, n]) => html`<option value="${k}" ${(ex.preg_stage || '') === k ? 'selected' : ''}>${n}</option>`)}</select>
+        <div class="hint">We add extra calories and protein from the second trimester and while breastfeeding, using average estimates. They are not a prescription.</div></div>`);
+    }
+    if (c.includes('clin')) {
+      parts.push(html`<div class="field"><div class="notice">${icon('alert')}<div>We do not set a calorie deficit, a high protein target or a water target for you, and we only suggest meals within the limits below. If your doctor or dietitian gave you daily limits, enter them. Leave a box empty if you were not given a number. We cannot track potassium or phosphorus, so please follow your care team's advice on those.</div></div>
+        <div class="grid2" style="margin-top:10px">
+          <div><label class="f" for="x-na">Sodium limit (mg a day)</label><input class="input" id="x-na" inputmode="numeric" placeholder="e.g. 1500" value="${ex.rx_sodium_mg ?? ''}"></div>
+          <div><label class="f" for="x-pr">Protein limit (g a day)</label><input class="input" id="x-pr" inputmode="numeric" placeholder="e.g. 45" value="${ex.rx_protein_g ?? ''}"></div>
+          <div><label class="f" for="x-fl">Fluid limit (ml a day)</label><input class="input" id="x-fl" inputmode="numeric" placeholder="e.g. 1500" value="${ex.rx_fluid_ml ?? ''}"></div></div>
+        <div class="hint">Without a sodium number we use a general ceiling of 2,000 mg. Your doctor may set a lower one.</div></div>`);
+    }
+    host.innerHTML = parts.map(String).join('');
+    const bind = (id, key) => { const el = host.querySelector(id); if (el) el.oninput = el.onchange = () => { ex[key] = el.value.trim(); }; };
+    bind('#x-stage', 'preg_stage'); bind('#x-na', 'rx_sodium_mg'); bind('#x-pr', 'rx_protein_g'); bind('#x-fl', 'rx_fluid_ml');
+  };
+  draw();
+  return draw;
+}
+
+/** The API fields for the extras that apply to these conditions. Blank means "not given". */
+export function condExtrasBody(conds, ex) {
+  const out = {};
+  if (conds.includes('preg')) out.preg_stage = ex.preg_stage || null;
+  if (conds.includes('clin')) for (const k of ['rx_sodium_mg', 'rx_protein_g', 'rx_fluid_ml']) out[k] = ex[k] === '' || ex[k] == null ? null : ex[k];
+  return out;
+}
 
 /* Reads the questionnaire fields (ids a-*) of a container into an API body. */
 export const toggleChip = (btn) => { btn.classList.toggle('on'); btn.setAttribute('aria-pressed', btn.classList.contains('on')); };

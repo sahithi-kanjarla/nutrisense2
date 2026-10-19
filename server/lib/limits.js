@@ -8,10 +8,15 @@
  *   Sodium         adults and teens 14+: under 2,000 mg (WHO)
  *                  age 13: under 1,800 mg (US Dietary Reference Intakes, 9 to 13 years)
  *                  high blood pressure: 1,500 mg (AHA ideal limit)
+ *                  kidney disease, heart failure or another doctor-managed condition: 2,000 mg as a general
+ *                  ceiling (KDIGO advises under 2 g a day for kidney disease). A limit the user's own care
+ *                  team gave them replaces it, and is used as given.
  *   Saturated fat  under 10% of calories (WHO); high cholesterol: under 6% (AHA)
  *   Added sugar    under 10% of calories (WHO); under 18: also at most 25 g (AHA);
  *                  type 2 diabetes or PCOS: under 5% of calories (WHO "ideal", and common advice for these conditions)
  */
+import { GENERAL_PROTEIN_PER_KG } from './plan.js';
+
 export const WATCH = [
   { key: 'sodium_mg', label: 'Sodium', unit: 'mg', bit: 1 },
   { key: 'sat_fat', label: 'Saturated fat', unit: 'g', bit: 2 },
@@ -35,6 +40,17 @@ export function limitsOf(profile, targets) {
     sodiumWhy = 'Up to 1,500 mg a day is the ideal limit for high blood pressure (American Heart Association).';
   }
 
+  if (conds.includes('clin')) {
+    if (profile?.rx_sodium_mg > 0) {
+      sodium = Math.round(profile.rx_sodium_mg);
+      sodiumWhy = 'The sodium limit you entered from your care team.';
+    } else {
+      // A stricter limit that already applies (such as blood pressure) stays; otherwise this is the general ceiling.
+      if (sodium >= 2000) sodiumWhy = 'A general ceiling of 2,000 mg a day. Your doctor may set a lower number, so please ask and enter it in your profile.';
+      sodium = Math.min(sodium, 2000);
+    }
+  }
+
   const satPct = conds.includes('chol') ? 6 : 10;
   const satWhy = satPct === 6
     ? 'Under 6% of your calories for high cholesterol (American Heart Association).'
@@ -51,6 +67,22 @@ export function limitsOf(profile, targets) {
     sodium_mg: { limit: sodium, why: sodiumWhy },
     sat_fat: { limit: Math.round((kcal * satPct) / 100 / 9), why: satWhy },
     added_sugar: { limit: sugar, why: sugarWhy }
+  };
+}
+
+/**
+ * What the app may and may not say to someone whose doctor manages a kidney, heart or similar condition.
+ * The protein figure is their care team's number if they entered it, otherwise the general adult figure.
+ */
+export function clinicalOf(profile) {
+  if (!(profile?.conditions || []).includes('clin')) return null;
+  const rxProtein = profile.rx_protein_g > 0 ? Math.round(profile.rx_protein_g) : null;
+  return {
+    sodium_limit: limitsOf(profile, null).sodium_mg.limit,
+    sodium_prescribed: profile.rx_sodium_mg > 0,
+    protein_cap: rxProtein ?? (profile.weight_kg ? Math.round(profile.weight_kg * GENERAL_PROTEIN_PER_KG) : null),
+    protein_prescribed: Boolean(rxProtein),
+    fluid_limit_ml: profile.rx_fluid_ml > 0 ? Math.round(profile.rx_fluid_ml) : null
   };
 }
 

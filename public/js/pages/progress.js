@@ -35,7 +35,7 @@ export default async function progress(root) {
       <div class="card stat"><div class="ico-b">${icon('progress', 22)}</div><div><b>${num(w.current, 1)} kg</b><span>current weight${w.goal ? ` · goal ${num(w.goal, 1)}` : ''}</span></div></div>
       <div class="card stat"><div class="ico-b">${icon('flame', 22)}</div><div><b>${ch == null ? '–' : `${ch > 0 ? '+' : ''}${num(ch, 1)} kg`}</b><span>change in ${days} days</span></div></div>
       <div class="card stat"><div class="ico-b">${icon('check', 22)}</div><div><b>${p.logged_days}/${days}</b><span>days logged</span></div></div>
-      <div class="card stat"><div class="ico-b">${icon('leaf', 22)}</div><div><b>${p.protein_hits}</b><span>days hit protein goal</span></div></div>
+      <div class="card stat"><div class="ico-b">${icon('leaf', 22)}</div>${p.clinical ? html`<div><b>${num(p.targets.protein)} g</b><span>protein ceiling</span></div>` : html`<div><b>${p.protein_hits}</b><span>days hit protein goal</span></div>`}</div>
     </div>
     <div class="cols">
       <div>

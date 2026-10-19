@@ -48,8 +48,8 @@ test('plan: safety rules', () => {
   const teen = computePlan({ ...base, age: 16 });
   assert.ok(Math.abs(teen.adjustment) <= 5, 'no deficit for under 18s (rounding only)');
   assert.ok(teen.notes.some((n) => n.includes('under 18')));
-  const preg = computePlan({ ...base, conditions: ['preg'] });
-  assert.ok(preg.adjustment >= 290 && preg.adjustment <= 310, 'no deficit and a pregnancy add-on');
+  const preg = computePlan({ ...base, conditions: ['preg'], preg_stage: 't2' });
+  assert.ok(preg.adjustment >= 330 && preg.adjustment <= 350, 'no deficit and the second-trimester add-on');
   const low = computePlan({ ...base, weight_kg: 45, height_cm: 170 });
   assert.ok(Math.abs(low.adjustment) <= 5, 'no deficit for a low BMI');
   const small = computePlan({ sex: 'female', age: 70, height_cm: 150, weight_kg: 50, activity: 'sedentary', goal: 'maintain' });
@@ -255,6 +255,7 @@ import { checkNutrients } from '../lib/nutrition.js';
 import { sumItems } from '../lib/ai/features.js';
 import { NUTRIENTS } from '../lib/food-nutrients.js';
 
+const OLD_PROFILES = 'CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, calories INTEGER)';
 const OLD_MEALS = `CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, date TEXT NOT NULL, meal_type TEXT NOT NULL,
   name TEXT NOT NULL, serving TEXT, kcal REAL NOT NULL DEFAULT 0, protein REAL NOT NULL DEFAULT 0, carbs REAL NOT NULL DEFAULT 0,
   fat REAL NOT NULL DEFAULT 0, fiber REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual', logged_at TEXT NOT NULL DEFAULT (datetime('now')))`;
@@ -265,13 +266,19 @@ test('migration: an old database gains the new columns, keeps every row, and old
   try {
     const old = new DatabaseSync(file);
     old.exec(OLD_MEALS);
+    old.exec(OLD_PROFILES);
+    old.exec("INSERT INTO profiles (user_id, calories) VALUES (1, 1800)");
     old.exec("INSERT INTO meals (user_id, date, meal_type, name, kcal) VALUES (1, '2026-10-01', 'lunch', 'Old dal', 300), (1, '2026-10-02', 'dinner', 'Old rice', 200)");
     assert.equal(versionOf(old), 0);
 
     const result = migrate(old, { file });
-    assert.deepEqual(result.added, ['sodium_mg', 'added_sugar', 'sat_fat', 'nutrient_gaps']);
+    assert.deepEqual(result.added, ['sodium_mg', 'added_sugar', 'sat_fat', 'nutrient_gaps', 'preg_stage', 'rx_sodium_mg', 'rx_protein_g', 'rx_fluid_ml']);
     assert.equal(versionOf(old), SCHEMA_VERSION);
     assert.ok(existsSync(`${file}.before-v1`), 'a backup of the old file is written before it changes');
+    assert.ok(existsSync(`${file}.before-v2`));
+    const prof = old.prepare('SELECT * FROM profiles').get();
+    assert.equal(prof.calories, 1800, 'existing profiles keep their targets');
+    assert.ok(prof.preg_stage === null && prof.rx_sodium_mg === null && prof.rx_protein_g === null && prof.rx_fluid_ml === null, 'new profile fields are "not set", never zero');
 
     const rows = old.prepare('SELECT * FROM meals ORDER BY id').all();
     assert.equal(rows.length, 2);
@@ -294,6 +301,7 @@ test('migration: an old database gains the new columns, keeps every row, and old
 test('migration: a database that already has the columns is only stamped, and a failure rolls back', () => {
   const fresh = new DatabaseSync(':memory:');
   fresh.exec(OLD_MEALS.replace('source TEXT', 'sodium_mg REAL, added_sugar REAL, sat_fat REAL, nutrient_gaps INTEGER NOT NULL DEFAULT 0, source TEXT'));
+  fresh.exec('CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, preg_stage TEXT, rx_sodium_mg REAL, rx_protein_g REAL, rx_fluid_ml REAL)');
   assert.deepEqual(migrate(fresh).added, []);
   assert.equal(versionOf(fresh), SCHEMA_VERSION);
 
@@ -443,4 +451,237 @@ test('watch status: none, unknown, ok, near, unsure ("at least") and over', () =
   assert.equal(n.added_sugar.partial, true, 'a lower-bound meal counts as incomplete');
   assert.equal(gapMask(['sodium_mg', 'added_sugar', 'nonsense']), 5);
   assert.equal(gapMask('sodium_mg'), 0);
+});
+
+/* ------------------------------ PR 4: nutrition safety ------------------------------ */
+
+import { unsafeIn, allergyWords, unmappedAllergies, screenMessage, SUPPORT_REPLY, prefsFromProfile } from '../lib/safety.js';
+import { bmiBands, calorieFloor, minTargetWeight, validateTargets, PREG_STAGES } from '../lib/plan.js';
+import { clinicalOf } from '../lib/limits.js';
+import { cleanRecipe } from '../lib/ai/features.js';
+
+const flagged = (name, prefs, opts) => checkConflicts(name, prefs, opts).length > 0;
+
+test('safety: harmless phrases stay allowed (no false positives)', () => {
+  // Goat milk is dairy, not meat.
+  assert.ok(!flagged('goat milk', { diet: 'veg' }));
+  assert.ok(!flagged('goat cheese sandwich', { diet: 'veg' }));
+  assert.ok(flagged('goat milk', { allergies: ['dairy'] }), 'but it is still dairy');
+  assert.ok(flagged('goat milk', { diet: 'vegan' }), 'and not vegan');
+  assert.ok(flagged('goat curry', { diet: 'veg' }), 'goat meat is still caught');
+  // Plant-based foods named after meat.
+  for (const f of ['veggie burger', 'soya mince', 'plant-based meat', 'cauliflower steak', 'mock chicken', 'meatless balls', 'eggless cake', 'egg-free mayo', 'chicken-free noodles']) {
+    assert.ok(!flagged(f, { diet: 'veg' }), `${f} is vegetarian`);
+  }
+  assert.ok(flagged('soya mince', { allergies: ['soy'] }), 'a substitute is still soy');
+  assert.ok(!flagged('coconut milk curry', { allergies: ['dairy'] }));
+});
+
+test('safety: unsafe foods are caught, including Hindi names, hidden ingredients and plurals', () => {
+  const caught = [
+    ['gosht curry', { diet: 'veg' }], ['murgh makhani', { diet: 'veg' }], ['machli fry', { diet: 'veg' }], ['jhinga masala', { diet: 'veg' }],
+    ['doodh patti', { allergies: ['dairy'] }], ['makkhan toast', { allergies: ['dairy'] }], ['tuppa rice', { allergies: ['dairy'] }], ['Bournvita', { allergies: ['dairy'] }],
+    ['naan', { allergies: ['dairy'] }], ['white sauce pasta', { allergies: ['dairy'] }],
+    ['pista kulfi', { allergies: ['tree'] }], ['chironji', { allergies: ['tree'] }], ['mungfali chikki', { allergies: ['peanuts'] }],
+    ['mayo sandwich', { allergies: ['eggs'] }], ['hummus', { allergies: ['sesame'] }], ['tilkut', { allergies: ['sesame'] }],
+    ['soy sauce', { allergies: ['gluten'] }], ['Worcestershire sauce', { allergies: ['fish'] }], ['machhi curry', { allergies: ['fish'] }], ['jhinga', { allergies: ['shellfish'] }],
+    ['2 rotis', { allergies: ['gluten'] }], ['shakarkandi chaat', { diet: 'jain' }], ['shahad', { diet: 'vegan' }], ['gluten-free bread', { allergies: ['gluten'] }]
+  ];
+  for (const [food, prefs] of caught) assert.ok(flagged(food, prefs), `${food} should be caught`);
+});
+
+test('safety: free-text allergies map to the right foods and unknown ones are reported', () => {
+  assert.ok(flagged('paneer', { allergies: ['milk allergy'] }));
+  assert.ok(flagged('curd rice', { allergies: ['lactose'] }));
+  assert.ok(flagged('wheat flour', { allergies: ['Gluten intolerance'] }));
+  assert.ok(flagged('prawn curry', { allergies: ['seafood'] }));
+  assert.ok(flagged('kiwi smoothie', { allergies: ['kiwi'] }), 'an unknown allergy is still matched as typed');
+  assert.deepEqual(unmappedAllergies(['dairy', 'milk allergy', 'kiwi', 'mushroom']), ['kiwi', 'mushroom']);
+  assert.equal(allergyWords('kiwi').known, false);
+  assert.equal(allergyWords('peanuts').known, true);
+});
+
+test('safety: AI text understands "no X" and "X-free", but a food name does not get that pass for allergies', () => {
+  const dairy = { allergies: ['dairy', 'gluten'] };
+  assert.equal(unsafeIn('This recipe has no milk and is gluten-free.', dairy).length, 0);
+  assert.equal(unsafeIn('Made without ghee or butter.', dairy).filter((c) => c.word === 'ghee').length, 0);
+  assert.ok(unsafeIn('Stir in a spoon of ghee.', dairy).length > 0);
+  assert.ok(unsafeIn('Use dairy-free yoghurt instead of curd', dairy).some((c) => c.word === 'curd'), 'only the negated word is ignored');
+  assert.ok(flagged('gluten-free bread', dairy), 'a label on a food is not trusted for an allergy');
+  assert.equal(unsafeIn('You may dislike okra', { dislikes: 'okra' }).length, 0, 'dislikes are not safety problems in prose');
+});
+
+test('safety: advice that is unsafe for a condition, in every text path', () => {
+  const clin = { conditions: ['clin'] };
+  for (const t of ['Have a protein shake after lunch', 'Try a high-protein breakfast', 'Drink more water through the day', 'Use lite salt instead', 'Swap to sendha namak', 'Coconut water is great', 'Try an electrolyte drink']) {
+    assert.ok(unsafeIn(t, clin).some((c) => c.type === 'advice'), `${t} is unsafe with a doctor-managed condition`);
+  }
+  assert.ok(!unsafeIn('Have dal, rice and a small salad', clin).length);
+  assert.ok(!unsafeIn('Try a high-protein breakfast', { conditions: ['t2'] }).length, 'other users are not affected');
+  assert.ok(unsafeIn('Have a glass of wine with dinner', { conditions: ['preg'] }).some((c) => c.key === 'preg'));
+  assert.ok(unsafeIn('Try a juice cleanse', { conditions: [] }).some((c) => c.key === 'crash'));
+  assert.ok(unsafeIn('Skip breakfast to save calories', {}).some((c) => c.key === 'crash'));
+  assert.ok(!unsafeIn('This plan is detox-free', {}).length, 'a negated crash diet is fine');
+  // Warning against the unsafe thing is good advice and must not be blocked.
+  assert.ok(!unsafeIn('Never skip meals, and avoid crash diets.', {}).length);
+  assert.ok(!unsafeIn('Please avoid alcohol and raw fish.', { conditions: ['preg'] }).length);
+  assert.ok(!unsafeIn('Avoid high-protein supplements unless your care team says so.', clin).length);
+  assert.ok(!unsafeIn('Your fasting blood sugar is worth checking with your doctor.', {}).length, 'a medical test is not a fast');
+  assert.ok(unsafeIn('You could try a prolonged fast.', {}).length);
+});
+
+test('safety: worrying chat messages get a fixed supportive reply', () => {
+  for (const m of ['I want to starve myself', 'how do I purge after eating', 'I only eat 600 calories a day', 'can I live on under 800 kcal', 'I think I have anorexia', 'how to lose 10 kg in a week']) {
+    assert.ok(screenMessage(m), `${m} should be screened`);
+  }
+  for (const m of ['What can I make with dal and rice?', 'I eat about 2000 calories a day', 'only 3000 calories planned for my bulk', 'I lost 2 kg in a month']) {
+    assert.ok(!screenMessage(m), `${m} is a normal question`);
+  }
+  assert.ok(SUPPORT_REPLY.includes('doctor') && SUPPORT_REPLY.includes('14416'));
+});
+
+test('plan: pregnancy stage sets the add-on, and an unknown stage adds nothing', () => {
+  const base = { sex: 'female', age: 30, height_cm: 160, weight_kg: 60, activity: 'light', goal: 'maintain', conditions: ['preg'] };
+  const none = computePlan(base);
+  const add = (stage) => computePlan({ ...base, preg_stage: stage });
+  assert.equal(none.calories, computePlan({ ...base, conditions: [] }).calories, 'no stage, no extra calories');
+  assert.ok(none.notes.some((n) => n.includes('trimester')), 'asks for the stage');
+  assert.equal(add('t1').calories, none.calories, 'first trimester adds nothing');
+  assert.equal(add('t2').calories - none.calories, 340);
+  assert.equal(add('t3').calories - none.calories, 450);
+  assert.equal(add('bf').calories - none.calories, 330);
+  assert.ok(add('t2').protein >= Math.round(60 * 1.1));
+  assert.ok(add('bf').protein >= Math.round(60 * 1.3));
+  assert.equal(add('nonsense').calories, none.calories, 'an invalid stage is ignored');
+  const lose = computePlan({ ...base, goal: 'lose', target_weight_kg: 52, preg_stage: 't2' });
+  assert.ok(lose.calories >= computePlan({ ...base, goal: 'lose', preg_stage: 't2' }).tdee, 'never a deficit in pregnancy');
+  assert.deepEqual(PREG_STAGES, ['t1', 't2', 't3', 'bf']);
+});
+
+test('plan: the goal and the target weight must point the same way', () => {
+  const base = { sex: 'female', age: 30, height_cm: 150, weight_kg: 50, activity: 'light' };
+  const maintain = computePlan({ ...base, goal: 'maintain' }).calories;
+  const same = computePlan({ ...base, goal: 'lose', target_weight_kg: 50 });
+  assert.equal(same.calories, maintain, 'losing to your current weight is just maintenance');
+  assert.ok(same.notes.some((n) => n.includes('not below')));
+  assert.equal(computePlan({ ...base, goal: 'lose' }).calories, maintain, 'no target set');
+  assert.ok(computePlan({ ...base, goal: 'lose', target_weight_kg: 46 }).calories < maintain, 'a real target gives a deficit');
+  assert.equal(computePlan({ ...base, goal: 'gain', target_weight_kg: 45 }).calories, maintain, 'gaining toward a lower weight is maintenance');
+  assert.ok(computePlan({ ...base, goal: 'gain', target_weight_kg: 55 }).calories > maintain);
+});
+
+test('plan: a target below BMI 18.5 is raised, for every goal, and BMI is not treated as a diagnosis', () => {
+  const p = computePlan({ sex: 'male', age: 30, height_cm: 170, weight_kg: 75, activity: 'light', goal: 'maintain', target_weight_kg: 40 });
+  assert.ok(p.goal_weight >= minTargetWeight(170) - 0.1);
+  assert.ok(p.notes.some((n) => n.includes('underweight range')));
+  const lose = computePlan({ sex: 'male', age: 30, height_cm: 170, weight_kg: 75, activity: 'light', goal: 'lose', target_weight_kg: 40 });
+  assert.ok(lose.weeks_to_goal > 0 && lose.timeline_note.includes('not a promise'));
+  assert.ok(lose.goal_weight >= 53, 'the timeline counts to the lowest healthy weight, not to 40 kg');
+});
+
+test('plan: BMI shows both the WHO and the South Asian ranges, only for adults', () => {
+  assert.deepEqual([bmiBands(17, 30).who, bmiBands(17, 30).south_asian], ['Underweight', 'Underweight']);
+  assert.deepEqual([bmiBands(22, 30).who, bmiBands(22, 30).south_asian], ['Healthy range', 'Healthy range']);
+  assert.deepEqual([bmiBands(23.5, 30).who, bmiBands(23.5, 30).south_asian], ['Healthy range', 'Overweight']);
+  assert.deepEqual([bmiBands(25.5, 30).who, bmiBands(25.5, 30).south_asian], ['Overweight', 'Obese']);
+  assert.deepEqual([bmiBands(31, 30).who, bmiBands(31, 30).south_asian], ['Obese', 'Obese']);
+  assert.equal(bmiBands(22, 16).applies, false, 'adult ranges do not apply under 19');
+  assert.equal(bmiBands(22, 16).who, undefined);
+  assert.ok(bmiBands(24, 30).note.includes('not a diagnosis'));
+  assert.equal(bmiBands(0, 30), null);
+});
+
+test('plan: calorie floors are shared and water is capped with a stated basis', () => {
+  assert.equal(calorieFloor('female', 30), 1200);
+  assert.equal(calorieFloor('male', 30), 1500);
+  assert.equal(calorieFloor('na', 30), 1350);
+  assert.equal(calorieFloor('male', 16), 1400, 'under 18s share one floor');
+  const light = computePlan({ sex: 'female', age: 30, height_cm: 155, weight_kg: 40, activity: 'light', goal: 'maintain' });
+  const heavy = computePlan({ sex: 'male', age: 30, height_cm: 180, weight_kg: 200, activity: 'light', goal: 'maintain' });
+  assert.equal(light.water_glasses, 6, 'at least 1.5 litres');
+  assert.equal(heavy.water_glasses, 12, 'at most 3 litres');
+});
+
+test('plan: a doctor-managed condition gets no deficit, a general protein figure and no fluid target', () => {
+  const base = { sex: 'male', age: 55, height_cm: 170, weight_kg: 80, activity: 'light', goal: 'gain', target_weight_kg: 90, conditions: ['clin'] };
+  const p = computePlan(base);
+  assert.equal(p.clinician_managed, true);
+  assert.equal(p.protein, 64, '0.8 g per kg, not the 1.6 g per kg of a muscle-gain goal');
+  assert.equal(p.protein_basis, 'general');
+  assert.equal(p.adjustment, p.calories - p.tdee);
+  assert.ok(Math.abs(p.adjustment) <= 5, 'no surplus or deficit');
+  assert.equal(p.fluid_managed, true);
+  assert.equal(p.fluid_limit_ml, null);
+  assert.ok(p.notes.some((n) => n.includes('ask your care team') || n.includes('Please ask them')));
+  const rx = computePlan({ ...base, rx_protein_g: 40, rx_fluid_ml: 1500 });
+  assert.equal(rx.protein, 40, 'the number from the care team wins');
+  assert.equal(rx.protein_basis, 'prescribed');
+  assert.equal(rx.fluid_limit_ml, 1500);
+  assert.equal(computePlan({ ...base, conditions: [] }).protein_basis, 'goal');
+  assert.ok(computePlan({ ...base, conditions: [] }).protein > 100, 'other users keep their goal-based protein');
+});
+
+test('limits: a doctor-managed condition has a general sodium ceiling unless the care team gave a number', () => {
+  const profile = { age: 55, conditions: ['clin'] };
+  assert.equal(limitsOf(profile, { calories: 2000 }).sodium_mg.limit, 2000);
+  assert.ok(limitsOf(profile, { calories: 2000 }).sodium_mg.why.includes('may set a lower number'));
+  const rx = limitsOf({ ...profile, rx_sodium_mg: 1200 }, { calories: 2000 }).sodium_mg;
+  assert.equal(rx.limit, 1200);
+  assert.ok(rx.why.includes('care team'));
+  const both = limitsOf({ age: 55, conditions: ['bp', 'clin'] }, { calories: 2000 }).sodium_mg;
+  assert.equal(both.limit, 1500, 'a general ceiling does not loosen the blood pressure one');
+  assert.ok(both.why.includes('blood pressure'));
+  assert.equal(clinicalOf({ conditions: ['t2'] }), null);
+  assert.deepEqual(clinicalOf({ conditions: ['clin'], weight_kg: 70 }), { sodium_limit: 2000, sodium_prescribed: false, protein_cap: 56, protein_prescribed: false, fluid_limit_ml: null });
+  assert.equal(clinicalOf({ conditions: ['clin'], weight_kg: 70, rx_protein_g: 35, rx_fluid_ml: 1000 }).protein_cap, 35);
+});
+
+test('targets: hand-set targets are sense-checked against the profile', () => {
+  const profile = { sex: 'female', age: 30, height_cm: 165, weight_kg: 60, activity: 'light', conditions: [] };
+  const ok = { calories: 1800, protein: 90, carbs: 220, fat: 60, fiber: 28, water_glasses: 8 };
+  validateTargets(ok, profile);
+  const rejects = (t, p = profile, text) => assert.throws(() => validateTargets({ ...ok, ...t }, p), (e) => e.status === 400 && (!text || e.message.includes(text)));
+  rejects({ calories: 1100 }, profile, 'below 1,200');
+  rejects({ calories: 2000 }, profile, 'match within 10%');
+  rejects({ protein: 90, carbs: 300, fat: 20, calories: 1800 }, profile, 'Fat should be at least 15%');
+  rejects({ protein: 30, carbs: 270, fat: 60, calories: 1800 }, profile, 'below 0.6 g per kg');
+  rejects({ protein: 190, carbs: 100, fat: 70, calories: 1800 }, profile, '3 g per kg');
+  // Teenagers and pregnancy cannot go below about maintenance.
+  const teen = { ...profile, age: 16 };
+  rejects({ calories: 1500, protein: 80, carbs: 180, fat: 55 }, teen, 'about your maintenance level');
+  rejects({ calories: 1500, protein: 80, carbs: 180, fat: 55 }, { ...profile, conditions: ['preg'] }, 'maintenance');
+  // A doctor-managed condition: protein stays under the ceiling, fluids under the limit.
+  const clin = { ...profile, conditions: ['clin'] };
+  const clinOk = { calories: 1900, protein: 48, carbs: 270, fat: 60, fiber: 28, water_glasses: 6 };
+  validateTargets(clinOk, clin);
+  rejects({ ...clinOk, protein: 90 }, clin, '48 g');
+  rejects({ ...clinOk, protein: 70, carbs: 250 }, { ...clin, rx_protein_g: 50 }, '50 g');
+  rejects({ ...clinOk, water_glasses: 8 }, { ...clin, rx_fluid_ml: 1000 }, 'fluid limit');
+  validateTargets({ ...clinOk, protein: 25, carbs: 290 }, clin); // a low protein target is the user's and their doctor's choice
+});
+
+test('targets: our own plan always passes its own checks', () => {
+  for (const sex of ['female', 'male', 'na']) for (const age of [13, 16, 25, 45, 70]) for (const goal of ['lose', 'maintain', 'gain', 'healthy']) for (const conditions of [[], ['preg'], ['clin'], ['t2']]) {
+    const p = { sex, age, goal, conditions, height_cm: 165, weight_kg: 62, target_weight_kg: goal === 'gain' ? 70 : 56, activity: 'light', preg_stage: 't3' };
+    const plan = computePlan(p);
+    assert.doesNotThrow(() => validateTargets({ calories: plan.calories, protein: plan.protein, carbs: plan.carbs, fat: plan.fat, fiber: plan.fiber, water_glasses: plan.water_glasses }, p), JSON.stringify({ sex, age, goal, conditions }));
+  }
+});
+
+test('recipes: a doctor-managed user only gets recipes within their sodium and protein ceilings', () => {
+  const profile = { diet: 'veg', allergies: [], dislikes: '', conditions: ['clin'], weight_kg: 70, rx_sodium_mg: 1500 };
+  const prefs = prefsFromProfile(profile);
+  const recipe = (extra) => ({ title: 'Dal and rice', ingredients: [{ name: 'toor dal', qty: '60 g' }, { name: 'rice', qty: '100 g' }], steps: ['Cook the dal.', 'Serve with rice.'], kcal: 450, protein: 18, carbs: 80, fat: 6, fiber: 8, servings: 1, ...extra });
+  const fine = cleanRecipe(recipe({ sodium_mg: 400 }), [], prefs);
+  assert.equal(fine.violations.length, 0);
+  assert.equal(fine.recipe.sodium_mg, 400);
+  assert.ok(fine.recipe.sodium_note.includes('AI estimate'));
+  const unknown = cleanRecipe(recipe({}), [], prefs);
+  assert.equal(unknown.recipe.sodium_mg, null);
+  assert.ok(unknown.recipe.sodium_note.includes('not verified'), 'an unknown sodium figure is never passed off as low');
+  assert.ok(cleanRecipe(recipe({ sodium_mg: 900 }), [], prefs).violations.some((v) => v.reason.includes('sodium')), 'over 40% of the daily ceiling');
+  assert.ok(cleanRecipe(recipe({ sodium_mg: 300, protein: 40 }), [], prefs).violations.some((v) => v.reason.includes('protein')), 'over half of the protein ceiling');
+  assert.ok(cleanRecipe(recipe({ steps: ['Add a scoop of protein powder.'] }), [], prefs).violations.some((v) => v.reason.includes('protein')), 'unsafe advice in the method is caught');
+  assert.equal(cleanRecipe(recipe({ sodium_mg: 900 }), [], prefsFromProfile({ ...profile, conditions: [] })).violations.length, 0, 'other users are not limited');
+  assert.equal(cleanRecipe(recipe({ sodium_mg: 400 }), [], prefsFromProfile({ ...profile, conditions: [] })).recipe.sodium_note, null);
 });

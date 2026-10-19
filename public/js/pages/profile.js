@@ -1,7 +1,7 @@
 import { get, put, post } from '../api.js';
 import { html, icon, num, $, $$, toast, busy, modal, confirmBox } from '../ui.js';
 import { state, refreshProfile, navigate } from '../app.js';
-import { GOALS, ACTIVITY, DIETS, ALLERGIES, CONDITIONS, label, planSummary, chip, toggleChip } from '../shared.js';
+import { GOALS, ACTIVITY, DIETS, ALLERGIES, CONDITIONS, label, planSummary, chip, toggleChip, mountCondExtras, condExtrasBody } from '../shared.js';
 
 export default async function profile(root) {
   await refreshProfile();
@@ -23,6 +23,7 @@ export default async function profile(root) {
       <div class="field"><label class="f" for="p-oa">Other things to avoid</label><input class="input" id="p-oa" maxlength="120" value="${P.allergies.filter((a) => !ALLERGIES.some((x) => x[0] === a)).join(', ')}" placeholder="comma separated"></div>
       <div class="field"><label class="f" for="p-dl">Dislikes</label><input class="input" id="p-dl" maxlength="200" value="${P.dislikes || ''}"></div>
       <div class="field"><label class="f">Health conditions</label><div class="chips" id="cond">${CONDITIONS.map(([k, n]) => chip(k, n, P.conditions.includes(k)))}</div></div>
+      <div id="cond-extra"></div>
       <div class="err" id="pe" role="alert"></div><button class="btn primary" id="save">Save and recalculate</button></form>
   </div><div>
     <div class="card"><div class="card-h"><h3>Daily targets</h3></div><div id="tg"></div>
@@ -35,7 +36,10 @@ export default async function profile(root) {
   let plan = state.plan;
   const showPlan = () => { $('#tg').innerHTML = plan ? String(planSummary(plan)) : ''; };
   showPlan();
-  $$('#alg .chip,#cond .chip').forEach((c) => c.onclick = () => toggleChip(c));
+  const extras = { preg_stage: P.preg_stage || '', rx_sodium_mg: P.rx_sodium_mg ?? '', rx_protein_g: P.rx_protein_g ?? '', rx_fluid_ml: P.rx_fluid_ml ?? '' };
+  const redrawExtras = mountCondExtras($('#cond-extra'), () => $$('#cond .chip.on').map((c) => c.dataset.key), extras);
+  $$('#alg .chip').forEach((c) => c.onclick = () => toggleChip(c));
+  $$('#cond .chip').forEach((c) => c.onclick = () => { toggleChip(c); redrawExtras(); });
 
   $('#pf').onsubmit = async (e) => {
     e.preventDefault();
@@ -43,9 +47,10 @@ export default async function profile(root) {
     const body = { goal: $('#p-goal').value, activity: $('#p-act').value, sex: $('#p-sex').value, age: $('#p-age').value, height_cm: $('#p-h').value, weight_kg: $('#p-w').value,
       target_weight_kg: $('#p-t').value === '' ? null : $('#p-t').value, diet: $('#p-diet').value, dislikes: $('#p-dl').value,
       allergies: [...$$('#alg .chip.on').map((c) => c.dataset.key), ...other].slice(0, 15), conditions: $$('#cond .chip.on').map((c) => c.dataset.key) };
+    Object.assign(body, condExtrasBody(body.conditions, extras));
     await busy($('#save'), async () => {
       $('#pe').textContent = '';
-      try { const r = await put('/api/profile', body); state.profile = r.profile; state.targets = r.targets; state.plan = r.plan; toast('Profile saved. Targets recalculated.'); navigate('/profile'); await profile(root); }
+      try { const r = await put('/api/profile', body); state.profile = r.profile; state.targets = r.targets; state.plan = r.plan; toast('Profile saved. Targets recalculated.'); if (r.warnings?.length) toast(r.warnings[0], 'bad'); navigate('/profile'); }
       catch (err) { $('#pe').textContent = err.message; }
     });
   };

@@ -63,6 +63,7 @@ async function api(method, path, body, token) {
 let counter = 0;
 async function newUser(profile = {}) {
   counter += 1;
+  if (counter % 15 === 0) (await import('../lib/http.js')).clearRateLimits(); // signups are limited to 20 an hour
   const s = await api('POST', '/auth/signup', { name: `User ${counter}`, email: `user${counter}@example.com`, password: 'password123' });
   assert.equal(s.status, 201);
   const o = await api('POST', '/onboarding', {
@@ -683,4 +684,200 @@ test('nutrients: account export includes the new columns', async () => {
   const shake = data.meals.find((m) => m.name === 'Packaged protein shake');
   assert.ok(shake && 'sodium_mg' in shake && shake.sodium_mg === null);
   assert.equal(data.meals.find((m) => m.name === 'Vegetable poha').sodium_mg, 520);
+});
+
+/* ------------------------------ PR 4: nutrition safety ------------------------------ */
+
+const T_OK = { calories: 1800, protein: 100, carbs: 200, fat: 55, fiber: 28, water_glasses: 8 };
+
+test('targets: invalid, missing, negative and extreme values are rejected with a reason', async () => {
+  const { token } = await newUser();
+  const put = (t) => api('PUT', '/targets', { ...T_OK, ...t }, token);
+  assert.equal((await put({})).status, 200);
+  for (const bad of [{ calories: -1800 }, { calories: 'abc' }, { calories: null }, { protein: -5 }, { protein: 'NaN' }, { fat: 'Infinity' }, { water_glasses: 0 }, { water_glasses: 17 }, { calories: 9000 }, { fiber: 500 }]) {
+    assert.equal((await put(bad)).status, 400, `rejects ${JSON.stringify(bad)}`);
+  }
+  const missing = await api('PUT', '/targets', { calories: 1800 }, token);
+  assert.equal(missing.status, 400);
+  // Macros must add up to the calories within 10% (fibre counts toward carbs).
+  assert.equal((await put({ calories: 2100 })).status, 400);
+  assert.equal((await put({ calories: 1850 })).status, 200);
+  const lowFat = await put({ calories: 1800, protein: 100, carbs: 300, fat: 20 });
+  assert.equal(lowFat.status, 400);
+  assert.ok(lowFat.error.includes('15%'));
+  const tooMuch = await put({ calories: 1800, protein: 230, carbs: 100, fat: 50 });
+  assert.equal(tooMuch.status, 400);
+  assert.ok(tooMuch.error.includes('3 g per kg'));
+  assert.equal((await put({ water_glasses: 16 })).status, 200, '16 glasses (4 litres) is the sanity limit');
+});
+
+test('targets: under 18s and pregnancy cannot be set below about maintenance', async () => {
+  const teen = await newUser({ age: 16, goal: 'healthy', sex: 'male', weight_kg: 60, height_cm: 170, target_weight_kg: undefined });
+  const low = await api('PUT', '/targets', { calories: 1500, protein: 70, carbs: 190, fat: 55, fiber: 20, water_glasses: 8 }, teen.token);
+  assert.equal(low.status, 400);
+  assert.ok(low.error.includes('maintenance'));
+  const keepAuto = await api('PUT', '/targets', { calories: teen.onboarding.targets.calories, protein: teen.onboarding.targets.protein, carbs: teen.onboarding.targets.carbs, fat: teen.onboarding.targets.fat, fiber: 25, water_glasses: 8 }, teen.token);
+  assert.equal(keepAuto.status, 200, 'the auto plan itself is always accepted');
+
+  const preg = await newUser({ conditions: ['preg'], preg_stage: 't2', goal: 'healthy', target_weight_kg: undefined });
+  const t = preg.onboarding.targets;
+  assert.ok(t.calories >= preg.onboarding.plan.tdee + 330, 'second trimester adds about 340 kcal');
+  const cut = await api('PUT', '/targets', { calories: 1400, protein: 80, carbs: 170, fat: 50, fiber: 25, water_glasses: 8 }, preg.token);
+  assert.equal(cut.status, 400);
+});
+
+test('profile: pregnancy stage and doctor-given limits are stored, validated and cleared with their condition', async () => {
+  const { token } = await newUser({ goal: 'maintain', target_weight_kg: undefined });
+  assert.equal((await api('PUT', '/profile', { conditions: ['preg'], preg_stage: 'soon' }, token)).status, 400, 'unknown stage');
+  const none = await api('PUT', '/profile', { conditions: ['preg'] }, token);
+  assert.equal(none.plan.preg_stage, null);
+  assert.ok(none.plan.notes.some((n) => n.includes('trimester')));
+  const t2 = await api('PUT', '/profile', { conditions: ['preg'], preg_stage: 't2' }, token);
+  assert.equal(t2.profile.preg_stage, 't2');
+  assert.equal(t2.targets.calories - none.targets.calories, 340, 'targets are recalculated when the stage is set');
+  const off = await api('PUT', '/profile', { conditions: [] }, token);
+  assert.equal(off.profile.preg_stage, null, 'the stage is cleared when pregnancy is unticked');
+
+  for (const bad of [{ rx_protein_g: 5 }, { rx_protein_g: 'lots' }, { rx_sodium_mg: 100 }, { rx_fluid_ml: -1 }, { rx_fluid_ml: 99999 }]) {
+    assert.equal((await api('PUT', '/profile', { conditions: ['clin'], ...bad }, token)).status, 400, `rejects ${JSON.stringify(bad)}`);
+  }
+  const clin = await api('PUT', '/profile', { conditions: ['clin'], rx_protein_g: 40, rx_sodium_mg: 1500, rx_fluid_ml: 1200 }, token);
+  assert.equal(clin.status, 200);
+  assert.deepEqual([clin.profile.rx_protein_g, clin.profile.rx_sodium_mg, clin.profile.rx_fluid_ml], [40, 1500, 1200]);
+  assert.equal(clin.targets.protein, 40);
+  assert.equal(clin.plan.clinician_managed, true);
+  assert.equal(clin.plan.fluid_limit_ml, 1200);
+  const blank = await api('PUT', '/profile', { conditions: ['clin'], rx_protein_g: '', rx_sodium_mg: '', rx_fluid_ml: '' }, token);
+  assert.equal(blank.profile.rx_protein_g, null, 'blank means "not given", never zero');
+  assert.equal(blank.targets.protein, Math.round(blank.profile.weight_kg * 0.8));
+  await api('PUT', '/profile', { conditions: ['clin'], rx_sodium_mg: 1200 }, token);
+  const removed = await api('PUT', '/profile', { conditions: [] }, token);
+  assert.equal(removed.profile.rx_sodium_mg, null, 'limits are cleared with the condition');
+  assert.ok(removed.targets.protein > 60, 'ordinary protein returns');
+});
+
+test('doctor-managed condition: protein ceiling, no fluid target, sodium ceiling everywhere', async () => {
+  const { token } = await newUser({ goal: 'gain', target_weight_kg: 80, weight_kg: 70, conditions: ['clin'], rx_sodium_mg: 1500, rx_protein_g: 45 });
+  const dash = await api('GET', `/dashboard?date=${TODAY}`, undefined, token);
+  assert.equal(dash.clinical.protein_cap, 45);
+  assert.equal(dash.clinical.sodium_limit, 1500);
+  assert.equal(dash.water.managed, true);
+  assert.equal(dash.targets.protein, 45);
+  assert.equal(dash.watch.find((w) => w.key === 'sodium_mg').limit, 1500);
+  const over = await api('PUT', '/targets', { calories: 2300, protein: 90, carbs: 300, fat: 70, fiber: 28, water_glasses: 8 }, token);
+  assert.equal(over.status, 400);
+  assert.ok(over.error.includes('45 g'));
+  const water = await api('PUT', '/targets', { calories: dash.targets.calories, protein: 45, carbs: dash.targets.carbs, fat: dash.targets.fat, fiber: 28, water_glasses: 12 }, token);
+  assert.equal(water.status, 200, 'with no fluid limit entered there is nothing to check a water number against');
+  const progress = await api('GET', `/progress?date=${TODAY}&days=7`, undefined, token);
+  assert.equal(progress.clinical.protein_cap, 45);
+  const plain = await newUser();
+  assert.equal((await api('GET', `/dashboard?date=${TODAY}`, undefined, plain.token)).clinical, null);
+});
+
+test('doctor-managed condition: the AI is told the ceilings, and the balancer never chases protein', async () => {
+  const { token } = await newUser({ conditions: ['clin'], rx_protein_g: 45, pantry: ['paneer', 'toor', 'spinach', 'oats'] });
+  geminiReply = () => ({ json: { reply: 'Dal with rice and a small salad would suit you.', recipe: null } });
+  await api('POST', '/ai/chat', { message: 'what should I eat tonight?' }, token);
+  const prompt = calls.gemini[0].systemInstruction?.parts?.[0]?.text || calls.gemini[0].contents.map((c) => c.parts[0].text).join('\n');
+  assert.ok(prompt.includes('CLINICIAN-MANAGED CONDITION'));
+  assert.ok(prompt.includes('Protein ceiling: 45 g'));
+  assert.ok(prompt.includes('Never suggest extra or high protein'));
+
+  calls.gemini.length = 0;
+  const bal = await api('POST', '/ai/balance', { date: TODAY }, token);
+  assert.notEqual(bal.gap?.nutrient, 'protein', 'protein is a ceiling for this user, not a gap');
+  if (bal.gap) assert.equal(bal.gap.nutrient, 'fiber');
+  assert.ok(!bal.suggestions.some((s) => s.name === 'Paneer' && bal.gap?.nutrient === 'protein'));
+});
+
+test('doctor-managed condition: unsafe chat advice and unsafe recipes are blocked and retried', async () => {
+  const { token } = await newUser({ conditions: ['clin'], rx_sodium_mg: 1500, rx_protein_g: 45 });
+  // The reply itself is unsafe, so it is replaced.
+  geminiReply = () => ({ json: { reply: 'Add a protein shake and drink more water to flush out the extra salt.', recipe: null } });
+  const unsafe = await api('POST', '/ai/chat', { message: 'how can I feel better?' }, token);
+  assert.ok(!unsafe.reply.includes('protein shake'));
+  assert.ok(unsafe.reply.includes('careful'));
+
+  // A recipe over the sodium ceiling is refused, then a good one is accepted.
+  const salty = { title: 'Pickled noodles', servings: 1, kcal: 400, protein: 12, carbs: 70, fat: 8, fiber: 4, sodium_mg: 1400, ingredients: [{ name: 'rice', qty: '100 g' }], steps: ['Cook.'] };
+  const good = { title: 'Plain khichdi', servings: 1, kcal: 380, protein: 12, carbs: 68, fat: 6, fiber: 5, sodium_mg: 300, ingredients: [{ name: 'rice', qty: '60 g' }, { name: 'moong dal', qty: '30 g' }], steps: ['Cook together.'] };
+  let n = 0;
+  geminiReply = () => ({ json: { reply: 'Here is one.', recipe: n++ === 0 ? salty : good } });
+  const r = await api('POST', '/ai/chat', { message: 'give me a dinner recipe' }, token);
+  assert.equal(r.recipe.title, 'Plain khichdi');
+  assert.equal(calls.gemini.length, 3, 'the unsafe reply (1), then the salty recipe (2) and its retry (3)');
+  assert.ok(r.recipe.sodium_note.includes('AI estimate'));
+  assert.equal(r.recipe.sodium_mg, 300);
+
+  // The "high protein" filter is not offered to this user.
+  geminiReply = () => ({ json: { recipes: [{ title: 'Plain khichdi', servings: 1, protein: 12, sodium_mg: 300, ingredients: [{ name: 'rice', qty: '60 g' }], steps: ['Cook.'] }] } });
+  calls.gemini.length = 0;
+  await api('POST', '/ai/recipes', { date: TODAY, filter: 'high_protein', refresh: true }, token);
+  const asked = JSON.stringify(calls.gemini[0]);
+  assert.ok(!asked.includes('at least 20 g per serving'), 'the high-protein instruction is not sent');
+});
+
+test('chat: worrying messages get the fixed supportive reply and never reach the AI', async () => {
+  const { token } = await newUser();
+  geminiReply = () => ({ json: { reply: 'Sure, here is a 500 calorie plan', recipe: null } });
+  const r = await api('POST', '/ai/chat', { message: 'I want to eat only 500 calories a day to lose weight fast' }, token);
+  assert.equal(r.status, 200);
+  assert.equal(r.support, true);
+  assert.equal(r.provider, null);
+  assert.ok(r.reply.includes('doctor') && r.reply.includes('14416'));
+  assert.equal(calls.gemini.length + calls.groq.length, 0, 'no AI provider was called');
+  const history = await api('GET', '/ai/chat', undefined, token);
+  assert.equal(history.messages.length, 2, 'both messages are kept in the chat history');
+  // A normal question still goes to the AI.
+  const ok = await api('POST', '/ai/chat', { message: 'what can I cook with dal?' }, token);
+  assert.equal(ok.support, undefined);
+  assert.equal(calls.gemini.length, 1);
+});
+
+test('chat: "no dairy" in an AI reply is allowed, and a real conflict is still replaced', async () => {
+  const { token } = await newUser({ allergies: ['dairy'] });
+  geminiReply = () => ({ json: { reply: 'This khichdi has no milk or ghee, so it suits your dairy allergy.', recipe: null } });
+  const fine = await api('POST', '/ai/chat', { message: 'something simple' }, token);
+  assert.ok(fine.reply.includes('no milk'));
+  geminiReply = () => ({ json: { reply: 'Finish it with a spoon of ghee.', recipe: null } });
+  const bad = await api('POST', '/ai/chat', { message: 'something simple' }, token);
+  assert.ok(!bad.reply.includes('ghee'));
+});
+
+test('profile: free-text allergies the app can only match by word are reported back', async () => {
+  const { token } = await newUser();
+  const r = await api('PUT', '/profile', { allergies: ['peanuts', 'milk allergy', 'kiwi'] }, token);
+  assert.equal(r.warnings.length, 1);
+  assert.ok(r.warnings[0].includes('kiwi') && !r.warnings[0].includes('milk allergy'));
+  const none = await api('PUT', '/profile', { allergies: ['peanuts', 'lactose'] }, token);
+  assert.deepEqual(none.warnings, []);
+});
+
+test('plan: BMI ranges, timeline wording and the lowest healthy weight come through the API', async () => {
+  const { token, onboarding } = await newUser({ goal: 'lose', weight_kg: 90, height_cm: 160, target_weight_kg: 30 });
+  const plan = onboarding.plan;
+  assert.equal(plan.bmi_bands.south_asian, 'Obese');
+  assert.equal(plan.bmi_bands.who, 'Obese');
+  assert.ok(plan.timeline_note.includes('not a promise'));
+  const saved = await api('GET', '/profile', undefined, token);
+  assert.ok(saved.profile.target_weight_kg >= 47, 'a target below BMI 18.5 is raised before it is saved');
+  const teen = await newUser({ age: 16, weight_kg: 60, height_cm: 165, goal: 'healthy', target_weight_kg: undefined });
+  assert.equal(teen.onboarding.plan.bmi_bands.applies, false);
+  const same = await newUser({ goal: 'lose', weight_kg: 60, height_cm: 165, target_weight_kg: 60 });
+  assert.ok(same.onboarding.plan.notes.some((n) => n.includes('not below your current weight')), 'losing to the current weight is maintenance');
+  assert.ok(Math.abs(same.onboarding.plan.adjustment) <= 5);
+});
+
+test('the front end shows the disclaimers it promises', async () => {
+  const { readFileSync } = await import('node:fs');
+  const shared = readFileSync(new URL('../../public/js/shared.js', import.meta.url), 'utf8');
+  assert.ok(shared.includes('South Asian scale'));
+  assert.ok(shared.includes('CARE_NOTE'));
+  assert.ok(shared.includes('not medical advice'));
+  assert.ok(shared.includes('weeks or more'));
+  const assistant = readFileSync(new URL('../../public/js/pages/assistant.js', import.meta.url), 'utf8');
+  assert.ok(assistant.includes('not medical advice') && assistant.includes('doctor or registered dietitian'));
+  const landing = readFileSync(new URL('../../public/js/pages/landing.js', import.meta.url), 'utf8');
+  assert.ok(landing.includes('not medical advice'));
 });

@@ -72,6 +72,8 @@ export function rateLimit(key, max, windowMs) {
     throw new HttpError(429, `Too many requests. Please try again in ${wait} seconds.`, 'rate_limited');
   }
 }
+/** For tests: forgets every counted request. */
+export const clearRateLimits = () => buckets.clear();
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of buckets) if (v.reset < now) buckets.delete(k);

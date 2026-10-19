@@ -1,12 +1,12 @@
 import { q, tx } from '../lib/db.js';
 import { bad, num, oneOf, str } from '../lib/http.js';
-import { ACTIVITY, DIETS, GOALS, SEXES, computePlan, validateBody } from '../lib/plan.js';
-import { ALLERGENS, checkConflicts } from '../lib/safety.js';
+import { ACTIVITY, DIETS, GOALS, PREG_STAGES, SEXES, computePlan, minTargetWeight, validateBody, validateTargets } from '../lib/plan.js';
+import { ALLERGENS, checkConflicts, unmappedAllergies } from '../lib/safety.js';
 import { findFood, per100 } from '../lib/foods.js';
 import { dateOr, todayStr } from '../lib/dates.js';
 import { getProfile, publicProfile, targetsOf } from '../lib/data.js';
 
-export const CONDITIONS = ['t2', 'bp', 'chol', 'thy', 'pcos', 'gut', 'preg'];
+export const CONDITIONS = ['t2', 'bp', 'chol', 'thy', 'pcos', 'gut', 'preg', 'clin'];
 
 export const QUICKSTART = {
   rice: ['Rice', 2000, 'g', 'dry'], atta: ['Atta', 2000, 'g', 'dry'], toor: ['Toor dal', 900, 'g', 'dry'],
@@ -40,6 +40,15 @@ export function readAnswers(b, base = {}) {
   }
   if (b.water_habit !== undefined) m.water_habit = num(b.water_habit, { min: 0, max: 30, optional: true, field: 'Water' });
   if (b.sleep_hours !== undefined) m.sleep_hours = num(b.sleep_hours, { min: 3, max: 14, optional: true, field: 'Sleep' });
+  if (b.preg_stage !== undefined) m.preg_stage = b.preg_stage === '' || b.preg_stage === null ? null : oneOf(b.preg_stage, PREG_STAGES, 'Pregnancy stage');
+  // Limits a clinician gave the user. Blank means "not given", which is different from zero.
+  if (b.rx_sodium_mg !== undefined) m.rx_sodium_mg = num(b.rx_sodium_mg, { min: 300, max: 5000, optional: true, field: 'Sodium limit' });
+  if (b.rx_protein_g !== undefined) m.rx_protein_g = num(b.rx_protein_g, { min: 10, max: 300, optional: true, field: 'Protein limit' });
+  if (b.rx_fluid_ml !== undefined) m.rx_fluid_ml = num(b.rx_fluid_ml, { min: 300, max: 5000, optional: true, field: 'Fluid limit' });
+  // Each extra only means something with its condition, so it is cleared when the condition is removed.
+  const conds = m.conditions || [];
+  if (!conds.includes('preg')) m.preg_stage = null;
+  if (!conds.includes('clin')) { m.rx_sodium_mg = null; m.rx_protein_g = null; m.rx_fluid_ml = null; }
   return m;
 }
 
@@ -50,14 +59,22 @@ function requireComplete(m) {
   validateBody(m);
 }
 
+/** A weight-loss target below BMI 18.5 is never saved: it is raised to the lowest healthy weight. */
+function targetToSave(m) {
+  const target = m.target_weight_kg ?? m.weight_kg;
+  const min = Math.ceil(minTargetWeight(m.height_cm) * 10) / 10;
+  return target < min && target < m.weight_kg && m.goal !== 'gain' ? min : target;
+}
+
 export function save(userId, m, plan, onboarded) {
   q.run(
     `UPDATE profiles SET goal=?, sex=?, age=?, height_cm=?, weight_kg=?, target_weight_kg=?, activity=?, meals_per_day=?, diet=?,
-       allergies=?, dislikes=?, conditions=?, water_habit=?, sleep_hours=?,
+       allergies=?, dislikes=?, conditions=?, water_habit=?, sleep_hours=?, preg_stage=?, rx_sodium_mg=?, rx_protein_g=?, rx_fluid_ml=?,
        calories=?, protein=?, carbs=?, fat=?, fiber=?, water_glasses=?, onboarded=?, updated_at=datetime('now')
      WHERE user_id=?`,
-    m.goal, m.sex, m.age, m.height_cm, m.weight_kg, m.target_weight_kg ?? m.weight_kg, m.activity, m.meals_per_day ?? 3, m.diet,
+    m.goal, m.sex, m.age, m.height_cm, m.weight_kg, targetToSave(m), m.activity, m.meals_per_day ?? 3, m.diet,
     JSON.stringify(m.allergies || []), m.dislikes || '', JSON.stringify(m.conditions || []), m.water_habit, m.sleep_hours,
+    m.preg_stage ?? null, m.rx_sodium_mg ?? null, m.rx_protein_g ?? null, m.rx_fluid_ml ?? null,
     plan.calories, plan.protein, plan.carbs, plan.fat, plan.fiber, plan.water_glasses, onboarded ? 1 : 0, userId
   );
 }
@@ -71,7 +88,12 @@ const alignPlan = (plan, saved) => ({
 
 const response = (userId, plan) => {
   const profile = getProfile(userId);
-  return { profile: publicProfile(profile), targets: targetsOf(profile), plan };
+  const warnings = [];
+  const loose = unmappedAllergies(profile.allergies);
+  if (loose.length) {
+    warnings.push(`We can only look for the exact ${loose.length > 1 ? 'words' : 'word'} "${loose.join('", "')}" in food names. If a food is made with it under another name, we may not catch it, so please check labels.`);
+  }
+  return { profile: publicProfile(profile), targets: targetsOf(profile), plan, warnings };
 };
 
 export function register(router) {
@@ -120,7 +142,11 @@ export function register(router) {
     const m = readAnswers(ctx.body, current);
     requireComplete(m);
     const plan = computePlan(m);
-    const keep = ctx.body.recalculate === false;
+    // Keeping custom targets is not allowed when a new condition makes the old ones unsuitable.
+    const has = (x, c) => (x.conditions || []).includes(c);
+    const rxChanged = ['rx_protein_g', 'rx_fluid_ml'].some((k) => (m[k] ?? null) !== (current[k] ?? null));
+    const newlyManaged = ['clin', 'preg'].some((c) => has(m, c) && !has(current, c)) || (has(m, 'clin') && rxChanged) || (has(m, 'preg') && m.preg_stage !== current.preg_stage);
+    const keep = ctx.body.recalculate === false && !newlyManaged;
     const targets = keep ? { calories: current.calories, protein: current.protein, carbs: current.carbs, fat: current.fat, fiber: current.fiber, water_glasses: current.water_glasses } : plan;
     save(ctx.user.id, m, targets, current.onboarded);
     if (m.weight_kg !== current.weight_kg) {
@@ -138,15 +164,10 @@ export function register(router) {
       carbs: Math.round(num(b.carbs, { min: 0, max: 800, field: 'Carbs' })),
       fat: Math.round(num(b.fat, { min: 10, max: 300, field: 'Fats' })),
       fiber: Math.round(num(b.fiber, { min: 5, max: 100, field: 'Fiber' })),
-      water_glasses: Math.round(num(b.water_glasses, { min: 1, max: 20, field: 'Water' }))
+      // No official upper limit exists. 16 glasses (4 litres) is a sanity limit, well above any usual need.
+      water_glasses: Math.round(num(b.water_glasses, { min: 1, max: 16, field: 'Water' }))
     };
-    const current = getProfile(ctx.user.id);
-    const floor = (current.age && current.age < 18) ? 1400 : ({ male: 1500, female: 1200 }[current.sex] || 1350);
-    if (t.calories < floor) throw bad(`For safety, calories cannot be set below ${floor} kcal. Please talk to a doctor or dietitian about a lower target.`);
-    const fromMacros = t.protein * 4 + t.carbs * 4 + t.fat * 9;
-    if (Math.abs(fromMacros - t.calories) > t.calories * 0.2) {
-      throw bad(`Your protein, carbs and fat add up to about ${fromMacros} kcal, which is far from ${t.calories} kcal. Please make them match within 20%.`);
-    }
+    validateTargets(t, getProfile(ctx.user.id));
     q.run("UPDATE profiles SET calories=?, protein=?, carbs=?, fat=?, fiber=?, water_glasses=?, updated_at=datetime('now') WHERE user_id=?",
       t.calories, t.protein, t.carbs, t.fat, t.fiber, t.water_glasses, ctx.user.id);
     return response(ctx.user.id, null);
@@ -155,7 +176,7 @@ export function register(router) {
   router.add('POST', '/api/profile/reset', async (ctx) => {
     q.run(
       `UPDATE profiles SET goal=NULL, sex=NULL, age=NULL, height_cm=NULL, weight_kg=NULL, target_weight_kg=NULL, activity=NULL,
-         diet='veg', allergies='[]', dislikes='', conditions='[]', water_habit=NULL, sleep_hours=NULL,
+         diet='veg', allergies='[]', dislikes='', conditions='[]', water_habit=NULL, sleep_hours=NULL, preg_stage=NULL, rx_sodium_mg=NULL, rx_protein_g=NULL, rx_fluid_ml=NULL,
          calories=NULL, protein=NULL, carbs=NULL, fat=NULL, fiber=NULL, onboarded=0 WHERE user_id=?`, ctx.user.id);
     return response(ctx.user.id, null);
   });
