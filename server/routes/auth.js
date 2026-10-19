@@ -4,11 +4,12 @@ import { computePlan } from '../lib/plan.js';
 import { addDays, dateOr } from '../lib/dates.js';
 import { findFood, per100 } from '../lib/foods.js';
 import { QUICKSTART, save } from './profile.js';
-import { HttpError, bad, rateLimit, str } from '../lib/http.js';
+import { HttpError, bad, clientIp, rateLimit, str } from '../lib/http.js';
 import { hashPassword, signToken, verifyPassword } from '../lib/auth.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const ip = (req) => req.socket.remoteAddress || 'unknown';
+const ip = clientIp;
+const MAX_GUESTS = 500;
 const DUMMY_HASH = 's1:AAAAAAAAAAAAAAAAAAAAAA:' + Buffer.alloc(64).toString('base64url');
 
 function sessionFor(user) {
@@ -21,6 +22,9 @@ const GUEST_DOMAIN = 'guest.nutrisense.demo';
 /** Creates a throwaway guest account filled with sample data, so visitors can try every page. */
 async function createDemoUser(today) {
   q.run("DELETE FROM users WHERE email LIKE ? AND created_at < datetime('now', '-3 days')", `%@${GUEST_DOMAIN}`);
+  if (q.get('SELECT COUNT(*) AS n FROM users WHERE email LIKE ?', `%@${GUEST_DOMAIN}`).n >= MAX_GUESTS) {
+    throw new HttpError(503, 'The demo is busy right now. Please try again later or create an account.', 'demo_busy');
+  }
   const suffix = randomBytes(5).toString('hex');
   const hash = await hashPassword(randomBytes(18).toString('base64url'));
   const profile = {
@@ -60,6 +64,7 @@ async function createDemoUser(today) {
 
 export function register(router) {
   router.add('POST', '/api/auth/demo', async (ctx) => {
+    rateLimit(`demo:${ip(ctx.req)}`, 10, 60 * 60 * 1000);
     const user = await createDemoUser(dateOr(ctx.body?.today));
     ctx.status = 201;
     return sessionFor(user);

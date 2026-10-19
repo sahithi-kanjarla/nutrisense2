@@ -1,8 +1,115 @@
 # NutriSense
 
-A full-stack digital pantry and nutrition app: pantry with expiry tracking, meal logging with automatic macros, an AI diet balancer that suggests foods you already own, an allergy-aware AI assistant, recipes, a weekly planner with grocery list, and progress tracking.
+A full-stack digital pantry and nutrition app: pantry with expiry tracking, meal logging with automatic macros, an AI diet balancer that suggests foods you already own, an allergy-aware AI assistant, recipes, a weekly planner with grocery list, a package-label scanner, and progress tracking.
 
 Zero npm dependencies. It needs **Node 22.13 or newer** (uses the built-in `node:sqlite`).
+
+## Features
+
+| Area | What it does |
+| --- | --- |
+| Pantry | Items with quantity, location and expiry status (fresh, use soon, expired). **AI pantry scanner**: photograph a package (front, nutrition panel, ingredients, date) and review the extracted product before saving. |
+| Meals | Describe a meal and/or attach a photo; foods are listed, editable and recalculated by the app before you log. Calories, macros, fibre, sodium, saturated fat and added sugar. |
+| Diet balancer | Compares today's intake with your targets and suggests foods you already own. |
+| Assistant and recipes | Allergy- and diet-aware chat, pantry-based recipes, saved recipes. |
+| Planner | Weekly meal plan (manual or AI) and a grocery list built from it. |
+| Progress | Weight, water, calories and watch-list trends; weekly AI review. |
+| Account | Signup/login, data export (JSON), password change, account delete, throwaway demo account. |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Browser["Browser (public/)"]
+    SPA["Vanilla-JS single page app<br/>pages/*.js, api.js, ui.js"]
+  end
+
+  subgraph Server["Node 22 server (server/)"]
+    HTTP["index.js<br/>node:http, CSP, CORS, JSON errors"]
+    Router["lib/http.js<br/>router, validation, rate limit, static files"]
+    Auth["lib/auth.js<br/>scrypt + HS256 JWT"]
+    Routes["routes/*<br/>auth, profile, pantry, scan, meals,<br/>dashboard, ai, planner, account"]
+    Logic["Domain logic<br/>plan.js (targets), nutrition.js + foods.js (macros),<br/>limits.js (watch list), safety.js (allergy / diet / medical rules),<br/>scan.js (label checks)"]
+    AI["lib/ai<br/>features.js (prompts + output checks)<br/>index.js (routing, fallback, cooldown)"]
+    DB[("SQLite<br/>node:sqlite, WAL<br/>migrations.js")]
+  end
+
+  Gemini["Google Gemini<br/>gemini-2.5-flash"]
+  Groq["Groq<br/>llama-3.3-70b-versatile"]
+
+  SPA -- "fetch /api/* + Bearer token" --> HTTP
+  SPA -- "GET static files" --> HTTP
+  HTTP --> Router --> Auth
+  Router --> Routes
+  Routes --> Logic
+  Routes --> DB
+  Routes --> AI
+  Logic --> DB
+  AI -- "chat, recipes, plans, photos, labels" --> Gemini
+  AI -- "quick tasks and fallback" --> Groq
+  AI -. "every AI result passes through" .-> Logic
+```
+
+**Request flow: logging a meal from text or a photo**
+
+```mermaid
+sequenceDiagram
+  actor U as User
+  participant B as Browser
+  participant S as Server (routes/meals.js)
+  participant A as AI layer
+  participant N as nutrition.js + foods.js
+  participant D as SQLite
+
+  U->>B: "2 rotis with 1 tsp ghee" (+ optional photo)
+  B->>S: POST /api/meals/analyze (Bearer token)
+  S->>A: ask AI to name the foods and amounts
+  A-->>S: foods (Groq for text, Gemini for photos, each falls back to the other)
+  S->>N: recalculate from the food table / recipes
+  N-->>S: exact numbers, "assumed" badges, data gaps
+  S-->>B: editable review list (nothing saved yet)
+  U->>B: edits rows, presses Log
+  B->>S: POST /api/meals
+  S->>D: INSERT meal (null = no data, never 0)
+  S-->>B: updated day totals and watch list
+```
+
+**Pantry scanner flow:** photos (up to 4) -> `POST /api/pantry/scan` -> Gemini reads the label -> `scan.js` cleans and validates it (dates, units, nutrition per 100 g, allergen conflicts with your profile, duplicate detection) -> you review and edit -> `POST /api/pantry/scan/confirm` re-validates strictly and saves. Photos are never stored, and nothing is saved without `confirmed: true`.
+
+**Safety is enforced in code:** every AI reply passes through `lib/safety.js` (allergies, diet, crash-diet and medical rules) before it reaches the user.
+
+## Project structure
+
+```
+nutrisense/
+├── public/                 # Front end, served as static files (no build step)
+│   ├── index.html
+│   ├── css/app.css
+│   └── js/
+│       ├── app.js          # router, app shell
+│       ├── api.js          # fetch wrapper + token storage
+│       ├── ui.js           # html`` auto-escaping templates, modal, toast
+│       ├── shared.js       # components shared between pages
+│       └── pages/          # landing, auth, onboarding, dashboard, pantry, pantry-scan,
+│                           # meals, recipes, assistant, planner, progress, profile, settings
+├── server/
+│   ├── index.js            # HTTP server, security headers, graceful shutdown
+│   ├── routes/             # one file per area, each exports register(router)
+│   ├── lib/
+│   │   ├── ai/             # gemini.js, groq.js, index.js (routing), features.js (prompts + checks)
+│   │   ├── auth.js         # password hashing, JWT
+│   │   ├── db.js           # schema + tiny query helper;  migrations.js = versioned upgrades
+│   │   ├── env.js          # .env loading and config
+│   │   ├── http.js         # router, body parsing, validation, rate limiting, static files
+│   │   ├── plan.js         # calorie / macro / water targets
+│   │   ├── nutrition.js, foods.js, food-nutrients.js   # food table and calculation
+│   │   ├── limits.js       # sodium / saturated fat / added sugar limits
+│   │   ├── safety.js       # allergy, diet and medical safety checks
+│   │   └── scan.js         # label cleaning, per-100 g conversion, duplicates
+│   └── test/               # unit.test.js, api.test.js (mock AI servers, in-memory DB)
+├── Dockerfile, .env.example
+└── package.json
+```
 
 ## Setup
 
@@ -18,7 +125,12 @@ Put your keys in `.env`:
 | `GEMINI_API_KEY` | Google AI Studio key (free tier). Primary AI. |
 | `GROQ_API_KEY` | Groq key. Used for light tasks and as a fallback. |
 | `JWT_SECRET` | Optional. A random secret is generated and saved if empty. |
+| `GEMINI_MODEL`, `GROQ_MODEL` | Optional. Default `gemini-2.5-flash` and `llama-3.3-70b-versatile`. |
+| `GROQ_JSON_SCHEMA` | Optional. `true` asks Groq to enforce a JSON schema (falls back automatically if refused). |
 | `PORT`, `DATABASE_PATH` | Optional. Defaults: 4000 and `./server/data/nutrisense.db`. |
+| `HOST` | Optional. Default `127.0.0.1` (this machine only). Use `0.0.0.0` on a hosting platform. |
+| `TRUST_PROXY` | Set `true` behind a reverse proxy (Render, Railway, Fly, nginx) so rate limits use the real client IP from `X-Forwarded-For`. Leave unset when the server is exposed directly, or clients could fake their address. |
+| `CLIENT_ORIGIN` | Optional. Only if a separate website calls this API (turns on CORS for that origin). |
 
 The app works without keys: sign-up, pantry, meal logging (built-in food table of ~110 foods), the pantry-based balancer and the planner all run offline. Chat, recipes, photo analysis and AI planning need a key and show a clear "add your key" message otherwise.
 
@@ -75,13 +187,70 @@ Describe a meal, attach a photo, or do both. NutriSense lists the foods it found
 - Photos are analysed once and are not stored. Photo analysis needs a Gemini key.
 - Manual entry is unchanged.
 
+## Pantry scanner
+
+Photograph a package (front, nutrition panel, ingredients list, expiry date; up to four photos). **Needs a Gemini key.**
+
+- The AI only reads the label. The app then cleans and checks it: dates (flagging ambiguous ones such as 03/04), units, nutrition converted to per 100 g or 100 ml, allergens against your profile, and likely duplicates already in your pantry.
+- You review and edit everything. Nothing is saved until you confirm, and the server validates the payload again as strictly as any form.
+- Missing label values stay empty, never zero. Photos are analysed once and are not stored.
+- **Database upgrade (schema version 3):** `pantry_items` gains `brand`, `category`, `ingredients`, `allergens`, `sodium100`, `sugar100`, `sat_fat100`, `expiry_kind`, `expiry_text`, `mfg_on`, `label_nutrition` and `source`. A `.before-v3` backup is written first.
+
 ## Demo
 
 On the login page, **Try the demo** creates a temporary guest account with sample meals, pantry and weight history (removed after 3 days). Please do not enter real health details in a public demo.
 
+## API overview
+
+All routes are under `/api`. Everything except the ones marked public needs `Authorization: Bearer <token>`. Errors are `{ "error": "...", "code": "..." }`.
+
+| Area | Endpoints |
+| --- | --- |
+| Public | `GET /health`, `GET /ai/status`, `POST /auth/signup`, `POST /auth/login`, `POST /auth/demo` |
+| Session and account | `GET /auth/me`, `PUT /settings`, `POST /account/password`, `GET /account/export`, `DELETE /account` |
+| Profile | `GET /profile`, `PUT /profile`, `PUT /targets`, `POST /profile/reset`, `POST /onboarding`, `POST /plan/preview`, `GET /meta` |
+| Pantry | `GET/POST /pantry`, `PATCH/DELETE /pantry/:id`, `POST /pantry/scan`, `POST /pantry/scan/confirm` |
+| Meals | `GET/POST /meals`, `DELETE /meals/:id`, `POST /meals/analyze`, `/meals/analyze-photo`, `/meals/estimate-items` |
+| Dashboard | `GET /dashboard`, `GET /progress`, `GET/PUT /water`, `POST /weight` |
+| AI | `POST /ai/balance`, `GET/POST/DELETE /ai/chat`, `POST /ai/recipes`, `/ai/plan-week`, `/ai/review` |
+| Planner | `GET /planner`, `PUT /planner/meal`, `DELETE /planner/meal/:id`, grocery: `GET/POST /grocery`, `PATCH/DELETE /grocery/:id`, `POST /grocery/clear-checked`, `POST /grocery/from-plan` |
+| Recipes | `GET/POST /recipes/saved`, `DELETE /recipes/saved/:id` |
+
+Rate limits: signup 20 per hour per IP, login 10 per 15 minutes per IP and email, demo 10 per hour per IP, AI calls 30 per minute per user, scans 10 per minute per user.
+
 ## Deploying
 
-Set `GEMINI_API_KEY`, `GROQ_API_KEY` and `JWT_SECRET` as environment variables on the host (not the `.env` file). Use Node 22.13 or newer. The server listens on localhost by default; set `HOST=0.0.0.0` to accept outside connections. Use a host with a persistent disk for the SQLite database.
+NutriSense is a single Node process with a SQLite file, so it runs on one instance with a **persistent disk**. Do not run several copies against one database.
+
+### Docker
+
+```bash
+docker build -t nutrisense .
+docker run -d -p 4000:4000 -v nutrisense-data:/data \
+  -e GEMINI_API_KEY=... -e GROQ_API_KEY=... -e JWT_SECRET=$(openssl rand -hex 32) \
+  nutrisense
+```
+
+The image listens on `0.0.0.0:4000`, keeps the database in the `/data` volume and has a health check on `/api/health`.
+
+### Render, Railway, Fly.io or any Node host
+
+1. Node 22.13 or newer; build command none; start command `npm start`.
+2. Environment variables (not the `.env` file): `GEMINI_API_KEY`, `GROQ_API_KEY`, `JWT_SECRET` (a long random string), `HOST=0.0.0.0`, `TRUST_PROXY=true`, and `DATABASE_PATH` pointing into the persistent disk (for example `/data/nutrisense.db`).
+3. Attach a persistent disk or volume at that path. Without one, every redeploy wipes users and data.
+4. Health check path: `/api/health`. Terminate HTTPS at the platform (the server speaks plain HTTP).
+
+### Backups
+
+Copy the database while the app runs with `sqlite3 nutrisense.db ".backup backup.db"`, or snapshot the volume. Keep `.db-wal` with the file if you copy it by hand.
+
+### Before real users rely on it
+
+- [ ] Have a dietitian review the rules in "Safety rules" (this app is not clinically validated).
+- [ ] Add a privacy notice: profile, pantry and photos are sent to Google (Gemini) and Groq when AI features are used.
+- [ ] Set a strong `JWT_SECRET`; set `TRUST_PROXY=true` only behind a proxy you control.
+- [ ] Schedule database backups and test a restore.
+- [ ] Remember tokens last 30 days and live in the browser's localStorage; changing a password does not sign out other devices yet.
 
 ## Commands
 
