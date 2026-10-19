@@ -685,3 +685,73 @@ test('recipes: a doctor-managed user only gets recipes within their sodium and p
   assert.equal(cleanRecipe(recipe({ sodium_mg: 900 }), [], prefsFromProfile({ ...profile, conditions: [] })).violations.length, 0, 'other users are not limited');
   assert.equal(cleanRecipe(recipe({ sodium_mg: 400 }), [], prefsFromProfile({ ...profile, conditions: [] })).recipe.sodium_note, null);
 });
+
+/* ------------------------------ PR 5: number and quantity parsing ------------------------------ */
+
+test('num: supported formats are read exactly, ambiguous or malformed text is rejected', async () => {
+  const { num, parseNumber } = await import('../lib/http.js');
+  const ok = { 12: 12, '-3': -3, '+4': 4, '12.5': 12.5, '.5': 0.5, ' 7 ': 7, '1,234': 1234, '1,234,567.5': 1234567.5, '1,5': 1.5, '70,25': 70.25, '-1,234': -1234 };
+  for (const [text, want] of Object.entries(ok)) assert.equal(parseNumber(text), want, text);
+  assert.equal(parseNumber(42), 42);
+  for (const bad of ['1,2,3', '1.234,5', '1e3', '0x10', '12kg', '1,23,456', ',5', '5,', '1,', 'abc', '--1', '1..2', '1,2345', Infinity, NaN, true, [], {}]) {
+    assert.ok(Number.isNaN(parseNumber(bad)), String(bad));
+    assert.throws(() => num(bad, { field: 'Weight' }), /Weight must be a number/, String(bad));
+  }
+  assert.throws(() => num('', { field: 'Weight' }), /Weight is required/);
+  assert.throws(() => num(undefined), /required/);
+  assert.equal(num('', { optional: true }), null);
+  assert.equal(num(null, { optional: true }), null);
+  assert.equal(num('0'), 0, 'a real zero is kept');
+  assert.equal(num('-5', { min: -10 }), -5);
+  assert.throws(() => num('-5', { min: 0, field: 'Weight' }), /between 0 and/);
+  assert.throws(() => num('1,500', { max: 300 }), /between/);
+});
+
+test('fractions: decimals are never rewritten, valid fractions work, invalid ones are flagged', async () => {
+  const { simplifyFractions, hasMalformedFraction, estimateGrams, findFood } = await import('../lib/foods.js');
+  assert.equal(simplifyFractions('1/2 cup'), '0.5 cup');
+  assert.equal(simplifyFractions('1 1/2 cups'), '1.5 cups');
+  assert.equal(simplifyFractions('3 / 4 cup'), '0.75 cup');
+  assert.equal(simplifyFractions('1/3 cup'), '0.33 cup');
+  assert.equal(simplifyFractions('1/4 cup'), '0.25 cup');
+  assert.equal(simplifyFractions('2½ cups'), '2.5 cups');
+  assert.equal(simplifyFractions('0.5 cup'), '0.5 cup');
+  assert.equal(simplifyFractions('1.5 cup'), '1.5 cup');
+  for (const bad of ['1/0 cup', '1/2/3 cup', '1.5/2 cup', '1/0.5 cup', '3/00 cup']) {
+    assert.ok(hasMalformedFraction(bad), bad);
+    assert.equal(simplifyFractions(bad), bad, `${bad} is left exactly as written`);
+  }
+  for (const good of ['1/2 cup', '1 1/2 cup', '2 rotis', '150 g', '3/4']) assert.ok(!hasMalformedFraction(good), good);
+  const milk = findFood('milk');
+  const half = estimateGrams('1/2 cup', milk);
+  assert.equal(half.grams, 120);
+  assert.ok(!half.malformed);
+  for (const bad of ['1/0 cup', '1/2/3 cup', '1.5/2 cup']) {
+    const e = estimateGrams(bad, milk);
+    assert.equal(e.malformed, true, bad);
+    assert.equal(e.assumed, true, bad);
+    assert.equal(e.grams, 150, `${bad}: one typical portion, not a guessed multiple`);
+    assert.match(e.basis, /could not read the amount/, bad);
+  }
+});
+
+test('AI pantry context: stable order, unknown expiry labelled', async () => {
+  const { byExpiryThenName, pantryLine } = await import('../lib/ai/features.js');
+  const items = [
+    { id: 4, name: 'Zeera', days_left: null }, { id: 1, name: 'beans', days_left: 5 }, { id: 3, name: 'Apple', days_left: 5 },
+    { id: 2, name: 'Rice', days_left: null }, { id: 5, name: 'Milk', days_left: 0 }
+  ];
+  const want = ['Milk', 'Apple', 'beans', 'Rice', 'Zeera'];
+  assert.deepEqual([...items].sort(byExpiryThenName).map((i) => i.name), want);
+  assert.deepEqual([...items].reverse().sort(byExpiryThenName).map((i) => i.name), want, 'input order does not matter');
+  assert.match(pantryLine({ name: 'Rice', quantity: 2, unit: 'kg', days_left: null }), /expiry date not recorded/);
+  assert.match(pantryLine({ name: 'Milk', quantity: 1, unit: 'l', days_left: -1 }), /EXPIRED \(do not use\)/);
+});
+
+test('pantry matching: expired and unknown-expiry items', async () => {
+  const { matchPantry } = await import('../lib/data.js');
+  const pantry = [{ name: 'Milk', status: 'expired', id: 1 }, { name: 'Milk', status: 'ok', days_left: null, id: 2 }];
+  assert.equal(matchPantry('milk', pantry).id, 2, 'an item with no expiry date is preferred to an expired one');
+  assert.equal(matchPantry('milk', [pantry[0]]).status, 'expired', 'only an expired match is still reported as expired, never as fresh');
+  assert.equal(matchPantry('boiled egg', [{ name: 'Oil', status: 'ok' }]), null);
+});
