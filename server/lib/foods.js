@@ -296,13 +296,26 @@ export function findFood(text, context = 'pantry') {
 
 /* ------------------------------ Quantities ------------------------------ */
 
+/**
+ * True when the text contains a fraction that cannot be read as an amount: a zero denominator ("1/0"),
+ * a chain ("1/2/3") or a decimal inside a fraction ("1.5/2"). Such text is never turned into a number.
+ */
+export function hasMalformedFraction(text) {
+  const t = String(text || '');
+  return /\d\s*\/\s*0+(?!\d|\.\d)/.test(t)
+    || /\d\s*\/\s*\d+\s*\/\s*\d/.test(t)
+    || /\d\.\d+\s*\/\s*\d|\d\s*\/\s*\d*\.\d/.test(t);
+}
+
 export function simplifyFractions(text) {
   const half = { '½': 0.5, '¼': 0.25, '¾': 0.75 };
-  return String(text || '')
+  const raw = String(text || '');
+  if (hasMalformedFraction(raw)) return raw; // left exactly as written so nothing is rewritten wrongly
+  return raw
     .replace(/(\d+)\s*([½¼¾])/g, (_, w, f) => String(Number(w) + half[f]))
     .replace(/[½¼¾]/g, (f) => String(half[f]))
-    .replace(/(\d+)\s+(\d+)\s*\/\s*(\d+)/g, (m, w, n, d) => (Number(d) ? String(Number(w) + n / d) : m))
-    .replace(/(\d+)\s*\/\s*(\d+)/g, (m, n, d) => (Number(d) ? String(Math.round((n / d) * 100) / 100) : m))
+    .replace(/(?<![\d./])(\d+)\s+(\d+)\s*\/\s*(\d+)(?![\d./])/g, (m, w, n, d) => (Number(d) ? String(Number(w) + n / d) : m))
+    .replace(/(?<![\d./])(\d+)\s*\/\s*(\d+)(?![\d./])/g, (m, n, d) => (Number(d) ? String(Math.round((n / d) * 100) / 100) : m))
     .replace(/\bhalf\s+(?:a\s+)?(?=(?:cups?|bowls?|glass(?:es)?|tbsp|tsp)\b)/gi, '0.5 ')
     .replace(/\b(?:a|an|one)\s+(?=(?:cups?|bowls?|glass(?:es)?|tbsp|tsp)\b)/gi, '1 ');
 }
@@ -317,6 +330,12 @@ const QTY_RE = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${UNITS})?\\b`, 'i');
  * `basis` explains the conversion in plain words.
  */
 export function estimateGrams(rawText, food) {
+  if (hasMalformedFraction(rawText)) {
+    // Do not guess a multiple of a portion from an amount that cannot be read: one typical portion, clearly flagged.
+    const cookedFood = !food || food.ready || food.unit === 'ml';
+    const g = food?.gpp ? food.gpp : cookedFood ? 150 : 100;
+    return { grams: g, assumed: true, malformed: true, basis: `could not read the amount "${String(rawText).trim().slice(0, 40)}", so one typical portion (${g} ${food?.unit === 'ml' ? 'ml' : 'g'}) is assumed` };
+  }
   const text = simplifyFractions(rawText);
   const m = QTY_RE.exec(String(text || ''));
   const cooked = !food || food.ready || food.unit === 'ml';

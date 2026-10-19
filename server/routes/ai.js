@@ -6,6 +6,7 @@ import { dayTotals, getPantry, getProfile, remainingOf, targetsOf } from '../lib
 import { aiStatus } from '../lib/ai/index.js';
 import { prefsFromProfile, screenMessage, SUPPORT_REPLY } from '../lib/safety.js';
 import { rangeStats } from '../lib/stats.js';
+import { profileSignature } from '../lib/signature.js';
 import { balanceDay, chat, generateRecipes, planWeek, weeklyReview } from '../lib/ai/features.js';
 
 const CACHE_MS = 6 * 60 * 60 * 1000;
@@ -70,9 +71,7 @@ export function register(router) {
     let filter = FILTERS.includes(ctx.body.filter) ? ctx.body.filter : 'pantry';
     if (filter === 'high_protein' && (snap.profile.conditions || []).includes('clin')) filter = 'pantry'; // protein is a ceiling for them
     const sig = createHash('sha1').update(JSON.stringify([
-      filter, date, snap.pantry.map((i) => [i.name, Math.round(i.quantity), i.status]),
-      snap.profile.diet, snap.profile.allergies, snap.profile.dislikes, snap.profile.calories,
-      snap.profile.conditions, snap.profile.preg_stage, snap.profile.rx_sodium_mg, snap.profile.rx_protein_g
+      filter, date, snap.pantry.map((i) => [i.name, Math.round(i.quantity), i.status]), profileSignature(snap.profile)
     ])).digest('hex').slice(0, 16);
     const key = `recipes:${sig}`;
     if (!ctx.body.refresh) {
@@ -99,7 +98,7 @@ export function register(router) {
     const profile = getProfile(ctx.user.id);
     const stats = rangeStats(ctx.user.id, date, 7, targetsOf(profile));
     const compact = { days: stats.days, logged_days: stats.logged_days, protein_hits: stats.protein_hits, kcal_on_target: stats.kcal_on_target, avg: stats.avg, targets: stats.targets, weight_change_kg: stats.weight_change };
-    const key = `review:${date}:${createHash('sha1').update(JSON.stringify([compact, profile.diet, profile.allergies])).digest('hex')}`;
+    const key = `review:${date}:${createHash('sha1').update(JSON.stringify([compact, profileSignature(profile)])).digest('hex')}`;
     if (!ctx.body.refresh) {
       const hit = cacheGet(ctx.user.id, key);
       if (hit) return hit;

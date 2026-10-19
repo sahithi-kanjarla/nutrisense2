@@ -881,3 +881,146 @@ test('the front end shows the disclaimers it promises', async () => {
   const landing = readFileSync(new URL('../../public/js/pages/landing.js', import.meta.url), 'utf8');
   assert.ok(landing.includes('not medical advice'));
 });
+
+/* ------------------------------ PR 5: cache signature and structured output ------------------------------ */
+
+const REVIEW_OK = () => ({ json: { bullets: ['You hit protein.', 'Fiber is low.', 'Add oats.'] } });
+async function logDay(token) {
+  await api('POST', '/meals', { date: TODAY, name: 'Lunch', meal_type: 'lunch', kcal: 1500, protein: 70, carbs: 200, fat: 50, fiber: 20 }, token);
+}
+
+test('review cache: reused while nothing changed, refreshed when conditions, pregnancy or limits change', async () => {
+  const { token } = await newUser();
+  await logDay(token);
+  geminiReply = REVIEW_OK;
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  assert.equal(calls.gemini.length, 1, 'the second identical request is served from the cache');
+  // Each change below used to be missed by the cache key, so a stale review (written without the new safety rules) came back.
+  await api('PUT', '/profile', { conditions: ['preg'], preg_stage: 't2' }, token);
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  assert.equal(calls.gemini.length, 2, 'adding pregnancy asks the AI again');
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  assert.equal(calls.gemini.length, 2, 'and is cached again afterwards');
+  await api('PUT', '/profile', { conditions: ['clin'], rx_sodium_mg: 1500 }, token);
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  assert.equal(calls.gemini.length, 3, 'a doctor-managed condition asks the AI again');
+  await api('PUT', '/profile', { conditions: ['clin'], rx_sodium_mg: 1200 }, token);
+  await api('POST', '/ai/review', { date: TODAY }, token);
+  assert.equal(calls.gemini.length, 4, 'a different prescribed limit asks the AI again');
+});
+
+test('review cache: never shared between users, even with identical profiles and meals', async () => {
+  const a = await newUser();
+  const b = await newUser();
+  await logDay(a.token); await logDay(b.token);
+  geminiReply = REVIEW_OK;
+  await api('POST', '/ai/review', { date: TODAY }, a.token);
+  const rb = await api('POST', '/ai/review', { date: TODAY }, b.token);
+  assert.equal(calls.gemini.length, 2);
+  assert.equal(rb.source, 'ai');
+});
+
+test('profileSignature: order of lists does not matter, every safety field does', async () => {
+  const { profileSignature } = await import('../lib/signature.js');
+  const base = { diet: 'veg', allergies: ['peanuts', 'dairy'], conditions: ['bp', 'chol'], age: 30, sex: 'female', goal: 'lose', calories: 1800 };
+  assert.equal(profileSignature(base), profileSignature({ ...base, allergies: ['dairy', 'peanuts'], conditions: ['chol', 'bp'] }));
+  for (const change of [{ diet: 'vegan' }, { allergies: ['peanuts'] }, { conditions: ['bp'] }, { preg_stage: 't1' }, { rx_sodium_mg: 1500 }, { rx_protein_g: 40 },
+    { rx_fluid_ml: 1000 }, { age: 31 }, { sex: 'male' }, { goal: 'gain' }, { calories: 1700 }, { dislikes: 'okra' }]) {
+    assert.notEqual(profileSignature(base), profileSignature({ ...base, ...change }), JSON.stringify(change));
+  }
+});
+
+test('structured output: Gemini gets a response schema; the reply is still validated', async () => {
+  const { token } = await newUser();
+  geminiReply = () => ({ json: { recipes: [{ title: 'Pantry pulao', ingredients: [{ name: 'rice', qty: '1 cup' }], steps: ['x'] }, { not: 'a recipe' }, 'junk'] } });
+  const r = await api('POST', '/ai/recipes', { date: TODAY, filter: 'pantry', refresh: true }, token);
+  const cfg = calls.gemini[0].generationConfig;
+  assert.equal(cfg.responseMimeType, 'application/json');
+  assert.equal(cfg.responseJsonSchema.properties.recipes.type, 'array');
+  assert.equal(r.recipes.length, 1, 'malformed entries are dropped even though a schema was sent');
+});
+
+test('structured output: a rejected schema falls back to plain JSON mode once and is remembered', async () => {
+  const { token } = await newUser();
+  await logDay(token);
+  geminiReply = (body) => (body.generationConfig.responseJsonSchema
+    ? { status: 400, body: { error: { message: 'Invalid JSON payload received. Unknown name "responseJsonSchema" at generation_config' } } }
+    : REVIEW_OK());
+  const r = await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+  assert.equal(r.source, 'ai');
+  assert.equal(calls.gemini.length, 2);
+  assert.ok(calls.gemini[0].generationConfig.responseJsonSchema);
+  assert.equal(calls.gemini[1].generationConfig.responseJsonSchema, undefined);
+  assert.equal(calls.gemini[1].generationConfig.responseMimeType, 'application/json');
+  await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+  assert.equal(calls.gemini.length, 3, 'later calls skip the schema straight away');
+  assert.equal(calls.gemini[2].generationConfig.responseJsonSchema, undefined);
+});
+
+test('structured output: invalid model output and provider failure still end in safe local results', async () => {
+  const { token } = await newUser();
+  await logDay(token);
+  geminiReply = () => ({ text: 'Sorry, I cannot do that.' });
+  groqReply = () => ({ text: '{"bullets": "not a list"}' });
+  const bad = await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+  assert.equal(bad.source, 'local');
+  geminiReply = () => ({ status: 500, body: { error: { message: 'boom' } } });
+  groqReply = () => ({ status: 500, body: { error: { message: 'boom' } } });
+  const down = await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+  assert.equal(down.source, 'local');
+  assert.ok(down.bullets.length >= 2);
+});
+
+test('structured output: an unsafe reply is still blocked when the schema is honoured', async () => {
+  const { token } = await newUser({ allergies: ['peanuts'] });
+  geminiReply = () => ({ json: { reply: 'Try peanut butter on toast.', recipe: { title: 'Peanut toast', ingredients: [{ name: 'peanut butter', qty: '2 tbsp' }], steps: ['Spread.'] } } });
+  groqReply = geminiReply;
+  const r = await api('POST', '/ai/chat', { message: 'what can I eat', date: TODAY }, token);
+  assert.equal(r.recipe, null);
+  assert.ok(!/peanut/i.test(r.reply));
+  assert.ok(calls.gemini[0].generationConfig.responseJsonSchema.properties.reply);
+});
+
+test('structured output: Groq only gets a json_schema when GROQ_JSON_SCHEMA=true, and falls back if refused', async () => {
+  const { token } = await newUser();
+  await logDay(token);
+  geminiReply = () => ({ status: 500, body: { error: { message: 'down' } } });
+  groqReply = REVIEW_OK;
+  await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+  assert.deepEqual(calls.groq[0].response_format, { type: 'json_object' }, 'off by default');
+  process.env.GROQ_JSON_SCHEMA = 'true';
+  try {
+    calls.groq.length = 0;
+    await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+    assert.equal(calls.groq[0].response_format.type, 'json_schema');
+    assert.equal(calls.groq[0].response_format.json_schema.schema.properties.bullets.type, 'array');
+    const { resetCooldowns } = await import('../lib/ai/index.js');
+    resetCooldowns();
+    calls.groq.length = 0;
+    groqReply = (body) => (body.response_format.type === 'json_schema'
+      ? { status: 400, body: { error: { message: 'This model does not support response format json_schema' } } }
+      : REVIEW_OK());
+    const r = await api('POST', '/ai/review', { date: TODAY, refresh: true }, token);
+    assert.equal(r.source, 'ai');
+    assert.deepEqual(calls.groq.map((b) => b.response_format.type), ['json_schema', 'json_object']);
+  } finally {
+    delete process.env.GROQ_JSON_SCHEMA;
+  }
+});
+
+test('AI context: unknown expiry is labelled, expired items are left out, order is stable', async () => {
+  const { token } = await newUser();
+  await api('POST', '/pantry', { name: 'Zucchini', quantity: 1, unit: 'kg', today: TODAY }, token);
+  await api('POST', '/pantry', { name: 'Apple', quantity: 1, unit: 'kg', today: TODAY }, token);
+  await api('POST', '/pantry', { name: 'Old yogurt', quantity: 1, unit: 'kg', expires_on: '2026-10-01', today: TODAY }, token);
+  await api('POST', '/pantry', { name: 'Fresh spinach', quantity: 1, unit: 'kg', expires_on: '2026-10-15', today: TODAY }, token);
+  geminiReply = () => ({ json: { recipes: [] } });
+  await api('POST', '/ai/recipes', { date: TODAY, refresh: true }, token);
+  const prompt = calls.gemini.map((c) => c.systemInstruction.parts[0].text).find((t) => t.includes('Pantry:'));
+  assert.ok(!/Old yogurt/.test(prompt), 'an expired item is not offered');
+  assert.match(prompt, /Fresh spinach: .*expires in 1 day/);
+  assert.match(prompt, /Apple: 1000 g, expiry date not recorded/);
+  const order = ['Fresh spinach', 'Apple', 'Zucchini'].map((n) => prompt.indexOf(`- ${n}:`));
+  assert.ok(order[0] > -1 && order[0] < order[1] && order[1] < order[2], 'soonest first, unknown expiry after, ties by name');
+});

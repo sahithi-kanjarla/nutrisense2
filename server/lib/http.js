@@ -92,12 +92,33 @@ export function str(v, { max = 200, min = 0, field = 'Value' } = {}) {
   return s;
 }
 
+/**
+ * Reads a number from JSON input. Accepted text formats (anything else is rejected, never guessed):
+ *   plain          "12", "-3", "+4", "12.5", ".5"
+ *   thousands      "1,234", "1,234,567.5"   (commas must separate groups of exactly three digits)
+ *   decimal comma  "1,5", "70,25"           (one comma followed by one or two digits)
+ * Not accepted: "1,2,3", "1.234,5", "1e3", "0x10", "12kg". "1,234" always means one thousand two hundred thirty-four.
+ */
+const PLAIN_NUMBER = /^[+-]?(\d+(\.\d+)?|\.\d+)$/;
+const THOUSANDS_NUMBER = /^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/;
+const DECIMAL_COMMA_NUMBER = /^[+-]?\d+,\d{1,2}$/;
+
+export function parseNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  if (typeof v !== 'string') return NaN;
+  const s = v.trim();
+  if (PLAIN_NUMBER.test(s)) return Number(s);
+  if (THOUSANDS_NUMBER.test(s)) return Number(s.replace(/,/g, ''));
+  if (DECIMAL_COMMA_NUMBER.test(s)) return Number(s.replace(',', '.'));
+  return NaN;
+}
+
 export function num(v, { min = -Infinity, max = Infinity, field = 'Value', optional = false } = {}) {
-  if (v === undefined || v === null || v === '') {
+  if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) {
     if (optional) return null;
     throw bad(`${field} is required.`);
   }
-  const n = typeof v === 'number' ? v : Number(String(v).trim().replace(/^(\d+),(\d{1,2})$/, '$1.$2').replace(/,/g, ''));
+  const n = parseNumber(v);
   if (!Number.isFinite(n)) throw bad(`${field} must be a number.`);
   if (n < min || n > max) throw bad(`${field} must be between ${min} and ${max}.`);
   return n;

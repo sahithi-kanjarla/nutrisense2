@@ -1,6 +1,6 @@
 import { config } from '../env.js';
 import { HttpError } from '../http.js';
-import { AiError, geminiGenerate } from './gemini.js';
+import { AiError, geminiGenerate, schemaSupport } from './gemini.js';
 import { groqGenerate } from './groq.js';
 
 /**
@@ -23,6 +23,8 @@ export function aiStatus() {
 export function resetCooldowns() {
   cooldownUntil.gemini = 0;
   cooldownUntil.groq = 0;
+  schemaSupport.gemini = true;
+  schemaSupport.groq = true;
 }
 
 export function parseJson(text) {
@@ -36,7 +38,7 @@ export function parseJson(text) {
   throw new AiError('The AI reply was not valid JSON.', { status: 502 });
 }
 
-export async function generate({ tier = 'heavy', system, messages, json = false, images = [], temperature, maxTokens }) {
+export async function generate({ tier = 'heavy', system, messages, json = false, images = [], temperature, maxTokens, schema }) {
   const order = tier === 'light' ? ['groq', 'gemini'] : ['gemini', 'groq'];
   const usable = order.filter((p) => configured(p) && !(p === 'groq' && images.length));
   if (!usable.length) {
@@ -53,7 +55,7 @@ export async function generate({ tier = 'heavy', system, messages, json = false,
 
   for (const provider of attempts) {
     try {
-      const text = await IMPLS[provider]({ system, messages, json, images, temperature, maxTokens });
+      const text = await IMPLS[provider]({ system, messages, json, images, temperature, maxTokens, schema });
       const parsed = json ? parseJson(text) : undefined;
       return { text, json: parsed, provider };
     } catch (err) {

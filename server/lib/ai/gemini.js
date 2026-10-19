@@ -9,12 +9,33 @@ export class AiError extends Error {
   }
 }
 
+/** Set once Gemini refuses a response schema, so later calls skip straight to plain JSON mode. */
+export const schemaSupport = { gemini: true, groq: true };
+export const looksLikeSchemaRejection = (err) =>
+  err instanceof AiError && err.status === 400 && /schema|response_?format|response_?mime|json_?schema|unknown name|invalid json payload/i.test(err.message);
+
 /**
  * Calls the Gemini generateContent REST endpoint (free tier friendly).
  * @param {{system?:string, messages:{role:'user'|'assistant', content:string}[], json?:boolean,
- *          temperature?:number, maxTokens?:number, images?:{mime:string,data:string}[]}} opts
+ *          temperature?:number, maxTokens?:number, images?:{mime:string,data:string}[], schema?:object}} opts
+ * `schema` (a JSON Schema) is sent as responseJsonSchema when set. If Gemini rejects it, the call is repeated once in
+ * plain JSON mode. The caller must still validate the reply.
  */
-export async function geminiGenerate({ system, messages, json = false, temperature = 0.5, maxTokens = 2048, images = [] }) {
+export async function geminiGenerate(opts) {
+  const wantSchema = Boolean(opts.json && opts.schema && schemaSupport.gemini);
+  try {
+    return await geminiCall(opts, wantSchema);
+  } catch (err) {
+    if (wantSchema && looksLikeSchemaRejection(err)) {
+      schemaSupport.gemini = false;
+      console.warn('[ai] Gemini rejected the response schema; using plain JSON mode.');
+      return geminiCall(opts, false);
+    }
+    throw err;
+  }
+}
+
+async function geminiCall({ system, messages, json = false, temperature = 0.5, maxTokens = 2048, images = [], schema }, useSchema) {
   const key = config.geminiKey;
   if (!key) throw new AiError('Gemini API key is not set.', { provider: 'gemini' });
   const model = config.geminiModel;
@@ -27,6 +48,7 @@ export async function geminiGenerate({ system, messages, json = false, temperatu
 
   const generationConfig = { temperature, maxOutputTokens: maxTokens };
   if (json) generationConfig.responseMimeType = 'application/json';
+  if (json && useSchema) generationConfig.responseJsonSchema = schema;
   // Gemini 2.5 Flash "thinks" by default, which spends free-tier tokens and time on simple tasks.
   if (/2\.5-flash/.test(model)) generationConfig.thinkingConfig = { thinkingBudget: 0 };
 

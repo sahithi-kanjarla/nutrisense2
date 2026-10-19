@@ -26,6 +26,7 @@ export const config = {
   get geminiBase() { return env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'); },
   get groqKey() { return env('GROQ_API_KEY'); },
   get groqModel() { return env('GROQ_MODEL', 'llama-3.3-70b-versatile'); },
+  get groqJsonSchema() { return env('GROQ_JSON_SCHEMA').toLowerCase() === 'true'; },
   get groqBase() { return env('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'); },
   get databasePath() {
     const p = env('DATABASE_PATH', './server/data/nutrisense.db');

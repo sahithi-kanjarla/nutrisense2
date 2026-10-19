@@ -1,8 +1,26 @@
 import { config } from '../env.js';
-import { AiError } from './gemini.js';
+import { AiError, looksLikeSchemaRejection, schemaSupport } from './gemini.js';
 
-/** Calls Groq's OpenAI-compatible chat completions endpoint. */
-export async function groqGenerate({ system, messages, json = false, temperature = 0.4, maxTokens = 2048 }) {
+/**
+ * Calls Groq's OpenAI-compatible chat completions endpoint.
+ * Schema-enforced output (response_format json_schema) is only supported by some Groq models, so it is off unless
+ * GROQ_JSON_SCHEMA=true is set. If Groq rejects it, the call is repeated once in plain JSON mode.
+ */
+export async function groqGenerate(opts) {
+  const wantSchema = Boolean(opts.json && opts.schema && config.groqJsonSchema && schemaSupport.groq);
+  try {
+    return await groqCall(opts, wantSchema);
+  } catch (err) {
+    if (wantSchema && looksLikeSchemaRejection(err)) {
+      schemaSupport.groq = false;
+      console.warn('[ai] Groq rejected the response schema; using plain JSON mode.');
+      return groqCall(opts, false);
+    }
+    throw err;
+  }
+}
+
+async function groqCall({ system, messages, json = false, temperature = 0.4, maxTokens = 2048, schema }, useSchema) {
   const key = config.groqKey;
   if (!key) throw new AiError('Groq API key is not set.', { provider: 'groq' });
 
@@ -12,7 +30,7 @@ export async function groqGenerate({ system, messages, json = false, temperature
     max_tokens: maxTokens,
     messages: [...(system ? [{ role: 'system', content: system }] : []), ...messages.map((m) => ({ role: m.role, content: m.content }))]
   };
-  if (json) body.response_format = { type: 'json_object' };
+  if (json) body.response_format = useSchema ? { type: 'json_schema', json_schema: { name: 'response', schema } } : { type: 'json_object' };
 
   let res;
   try {
