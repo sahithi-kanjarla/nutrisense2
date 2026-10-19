@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config, ROOT } from './lib/env.js';
-import './lib/db.js';
+import { db } from './lib/db.js';
 import { HttpError, createRouter, readJson, sendJson, serveStatic } from './lib/http.js';
 import { authenticate } from './lib/auth.js';
 import { aiStatus } from './lib/ai/index.js';
@@ -21,7 +21,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 export function buildServer() {
   const router = createRouter();
   for (const mod of [auth, profile, pantry, scan, meals, dashboard, ai, planner, account]) mod.register(router);
-  router.add('GET', '/api/health', async () => ({ ok: true, ai: aiStatus() }), { auth: false });
+  router.add('GET', '/api/health', async () => { db.prepare('SELECT 1').get(); return { ok: true, ai: aiStatus() }; }, { auth: false });
 
   const CSP = [
     "default-src 'self'",
@@ -91,4 +91,13 @@ if (isMain) {
     console.log(`  Gemini key: ${s.gemini ? 'found' : 'missing'}   Groq key: ${s.groq ? 'found' : 'missing'}`);
     if (!s.any) console.log('  Add GEMINI_API_KEY and/or GROQ_API_KEY to .env to turn on the AI features.\n');
   });
+
+  process.on('unhandledRejection', (err) => console.error('[server] unhandled rejection:', err));
+  const shutdown = (signal) => {
+    console.log(`\n  ${signal} received, shutting down.`);
+    server.close(() => { try { db.close(); } catch { /* already closed */ } process.exit(0); });
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

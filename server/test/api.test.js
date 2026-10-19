@@ -48,6 +48,7 @@ beforeEach(async () => {
   groqReply = () => ({ status: 503, body: { error: { message: 'unset' } } });
   const { resetCooldowns } = await import('../lib/ai/index.js');
   resetCooldowns();
+  (await import('../lib/http.js')).clearRateLimits();
 });
 
 async function api(method, path, body, token) {
@@ -1334,4 +1335,18 @@ test('scanner: items saved by hand and scanned items both feed matching, logging
   assert.equal(matchPantry('moong dal', await pantryOf(token)).id, saved.item.id);
   const meal = await api('POST', '/meals', { date: TODAY, name: 'Moong dal', meal_type: 'lunch', quantity: '1 katori', kcal: 200, protein: 12, carbs: 30, fat: 2, fiber: 5, deduct: true }, token);
   assert.ok(meal.meal?.id || meal.id);
+});
+
+test('deploy: demo is rate limited, proxy IPs are honoured only with TRUST_PROXY, health checks the database', async () => {
+  for (let i = 0; i < 10; i++) assert.equal((await api('POST', '/auth/demo', { today: TODAY })).status, 201);
+  assert.equal((await api('POST', '/auth/demo', { today: TODAY })).status, 429);
+
+  const { clientIp } = await import('../lib/http.js');
+  const req = { headers: { 'x-forwarded-for': '203.0.113.7, 10.0.0.1' }, socket: { remoteAddress: '10.0.0.1' } };
+  assert.equal(clientIp(req), '10.0.0.1');
+  process.env.TRUST_PROXY = 'true';
+  try { assert.equal(clientIp(req), '203.0.113.7'); } finally { delete process.env.TRUST_PROXY; }
+
+  const h = await api('GET', '/health');
+  assert.equal(h.ok, true);
 });

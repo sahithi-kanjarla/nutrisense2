@@ -72,6 +72,17 @@ export function rateLimit(key, max, windowMs) {
     throw new HttpError(429, `Too many requests. Please try again in ${wait} seconds.`, 'rate_limited');
   }
 }
+/**
+ * The caller's address for rate limiting. Behind a reverse proxy (Render, Railway, Fly, nginx) every request
+ * arrives from the proxy, so with TRUST_PROXY=true the first X-Forwarded-For entry is used instead.
+ */
+export function clientIp(req) {
+  if (process.env.TRUST_PROXY === 'true') {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (fwd) return fwd;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
 /** For tests: forgets every counted request. */
 export const clearRateLimits = () => buckets.clear();
 setInterval(() => {
@@ -166,7 +177,7 @@ export async function serveStatic(res, publicDir, pathname) {
   try {
     const body = await readFile(target);
     const type = TYPES[path.extname(target)] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': target.endsWith('index.html') ? 'no-cache' : 'no-cache' });
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
     res.end(body);
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
