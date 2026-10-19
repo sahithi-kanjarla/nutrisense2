@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { config } from './env.js';
+import { migrate } from './migrations.js';
 
 const file = config.databasePath;
 if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
@@ -74,6 +75,10 @@ CREATE TABLE IF NOT EXISTS meals (
   carbs REAL NOT NULL DEFAULT 0,
   fat REAL NOT NULL DEFAULT 0,
   fiber REAL NOT NULL DEFAULT 0,
+  sodium_mg REAL,
+  added_sugar REAL,
+  sat_fat REAL,
+  nutrient_gaps INTEGER NOT NULL DEFAULT 0,
   source TEXT NOT NULL DEFAULT 'manual',
   logged_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -141,6 +146,8 @@ CREATE TABLE IF NOT EXISTS ai_cache (
   PRIMARY KEY (user_id, key)
 );
 `);
+
+migrate(db, { file });
 
 const cache = new Map();
 function stmt(sql) {

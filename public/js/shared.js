@@ -1,4 +1,4 @@
-import { html, icon, num } from './ui.js';
+import { html, icon, num, bar } from './ui.js';
 
 export const GOALS = [
   ['lose', 'Lose weight', 'A gentle deficit of about 15%'], ['maintain', 'Maintain weight', 'Stay where you are'],
@@ -40,3 +40,49 @@ export const planSummary = (p) => html`<div class="plan-box">
 export const toggleChip = (btn) => { btn.classList.toggle('on'); btn.setAttribute('aria-pressed', btn.classList.contains('on')); };
 export const chip = (key, text, on) => html`<button type="button" class="chip ${on ? 'on' : ''}" data-key="${key}" aria-pressed="${on ? 'true' : 'false'}">${text}</button>`;
 export const choice = (key, title, sub, on) => html`<button type="button" class="choice ${on ? 'on' : ''}" data-key="${key}" aria-pressed="${on ? 'true' : 'false'}"><b>${title}</b><span>${sub}</span></button>`;
+
+/* ------------------------------ Watch list: sodium, saturated fat, added sugar ------------------------------ */
+
+const WATCH_COLOR = { ok: 'var(--green)', near: 'var(--amber)', over: 'var(--rust)', unsure: '#b9c9bd', unknown: 'var(--track)', none: 'var(--track)' };
+const WATCH_TAG = { ok: ['', 'Within limit'], near: ['amber', 'Close to limit'], over: ['red', 'Over limit'], unsure: ['gray', 'May be higher'], unknown: ['gray', 'No data'], none: ['gray', 'Nothing logged'] };
+
+/**
+ * One nutrient value as text. null means no data (never "0"); `atLeast` adds the "at least" wording
+ * for totals where some foods or meals have no data.
+ */
+export const watchAmount = (value, unit, atLeast = false) => (value == null ? 'no data' : `${atLeast ? 'at least ' : ''}${num(value, unit === 'g' ? 1 : 0)} ${unit}`);
+
+function watchNote(w) {
+  if (w.status === 'none') return 'Nothing logged yet.';
+  if (w.status === 'unknown') return 'None of your logged meals have data for this yet.';
+  if (w.status === 'over') return w.partial ? 'Over your limit. The real amount may be even higher because some meals have no data.' : 'Over your limit.';
+  if (w.status === 'unsure') return `This is a minimum. ${w.complete} of ${w.total} meals have full data, so the real amount may be higher.`;
+  if (w.status === 'near') return 'Close to your limit for the day.';
+  return 'Within your limit for the day.';
+}
+
+/** The daily watch list card body: one row per nutrient with a bar, the limit and a plain-words status. */
+export function watchRows(list) {
+  return html`<div class="stack">${list.map((w) => {
+    const [kind, text] = WATCH_TAG[w.status];
+    return html`<div class="macro" data-watch="${w.key}" data-status="${w.status}">
+      <div class="row between small"><span title="${w.why}">${w.label}</span>
+        <span><b>${w.value == null ? 'No data' : `${w.partial ? 'At least ' : ''}${num(w.value, w.unit === 'g' ? 1 : 0)}`}</b> / ${num(w.limit)} ${w.unit} <span class="tag ${kind}">${text}</span></span></div>
+      ${bar(w.value ?? 0, w.limit, WATCH_COLOR[w.status])}
+      <div class="small muted" style="margin-top:4px">${watchNote(w)}</div></div>`;
+  })}</div>
+  <p class="small muted" style="margin-top:12px">Limits are ceilings to stay under, from general WHO and American Heart Association guidance, set for your age and conditions. They are not medical advice. Salt added at the table and dishes we cannot look up are not counted, so the real sodium can be higher.</p>`;
+}
+
+/** The same rows for a period average (Progress page). */
+export function watchAverageRows(list, days) {
+  return html`<div class="stack">${list.map((w) => {
+    const [kind, text] = WATCH_TAG[w.status];
+    const basis = w.days_with_data ? `Average of ${w.days_with_data} of ${w.logged_days} logged days that have data${w.partial_days ? ' (some of those days are missing meals, so it may be higher)' : ''}.` : `None of your ${days} logged days have data for this yet.`;
+    return html`<div class="macro" data-watch="${w.key}" data-status="${w.status}">
+      <div class="row between small"><span title="${w.why}">${w.label}</span>
+        <span><b>${w.avg == null ? 'No data' : `${w.partial_days ? 'At least ' : ''}${num(w.avg, w.unit === 'g' ? 1 : 0)}`}</b> / ${num(w.limit)} ${w.unit} <span class="tag ${kind}">${text}</span></span></div>
+      ${bar(w.avg ?? 0, w.limit, WATCH_COLOR[w.status])}
+      <div class="small muted" style="margin-top:4px">${basis}</div></div>`;
+  })}</div>`;
+}

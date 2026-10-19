@@ -1,5 +1,6 @@
 import { get, post } from '../api.js';
 import { html, icon, num, today, niceDate, parseDate, $, $$, toast, busy, modal, bar, emptyState } from '../ui.js';
+import { watchAverageRows } from '../shared.js';
 
 function weightChart(series, goal) {
   if (series.length < 2) return html`<p class="muted small">Log your weight on at least two different days to see a trend.</p>`;
@@ -47,6 +48,8 @@ export default async function progress(root) {
           <div class="row between"><span class="muted">Calories</span><b>${num(p.avg.kcal)} / ${num(p.targets.calories)}</b></div>
           <div class="stack" style="margin-top:12px">${p.coverage.map((c) => html`<div class="macro"><div class="row between small"><span>${c.label}</span><span><b>${num(c.avg, 0)}</b> / ${num(c.target)} g · ${c.pct}%</span></div>${bar(c.avg, c.target, c.pct >= 85 && c.pct <= 125 ? 'var(--green)' : 'var(--amber)')}</div>`)}</div>
           <p class="small muted" style="margin-top:12px">Energy split: ${split.protein}% protein · ${split.carbs}% carbs · ${split.fat}% fats</p></div>
+        <div class="card"><div class="card-h"><h3>Sodium, saturated fat and added sugar</h3></div>${watchAverageRows(p.watch, p.logged_days)}
+          <p class="small muted" style="margin-top:12px">Daily average against your limits. Meals without data are left out, never counted as zero.</p></div>
         <div class="card"><div class="card-h"><h3>Logging calendar</h3></div>
           <div class="cal">${p.calendar.map((c) => html`<i class="${c.status === 'none' ? '' : c.status}" title="${niceDate(c.date)}"></i>`)}</div>
           <div class="legend"><span><i style="background:var(--track)"></i>Not logged</span><span><i style="background:#9ad9b6"></i>Logged</span><span><i style="background:var(--green)"></i>On target</span></div></div>

@@ -1,7 +1,9 @@
 import { get, post, del } from '../api.js';
 import { html, icon, num, today, addDays, niceDate, $, $$, toast, busy, modal, aiDown, emptyState, cap, ring } from '../ui.js';
 import { state } from '../app.js';
-import { MEAL_TYPES } from '../shared.js';
+import { MEAL_TYPES, watchRows, watchAmount } from '../shared.js';
+
+const WATCH_FIELDS = [['sodium_mg', 'Sodium', 'mg'], ['sat_fat', 'Sat. fat', 'g'], ['added_sugar', 'Added sugar', 'g']];
 
 const guessType = () => { const h = new Date().getHours(); return h < 11 ? 'breakfast' : h < 16 ? 'lunch' : h < 19 ? 'snack' : 'dinner'; };
 
@@ -54,8 +56,9 @@ export default async function meals(root) {
         <div class="card"><div class="row" style="gap:18px">${ring({ value: tot.kcal, max: t.calories, size: 110, label: num(tot.kcal), sub: `of ${num(t.calories)}` })}
           <div class="grow small"><div class="row between"><span>Protein</span><b>${num(tot.protein)} g</b></div><div class="row between"><span>Carbs</span><b>${num(tot.carbs)} g</b></div>
           <div class="row between"><span>Fats</span><b>${num(tot.fat)} g</b></div><div class="row between"><span>Fiber</span><b>${num(tot.fiber)} g</b></div></div></div></div>
+        <div class="card" id="watch"><div class="card-h"><h3>Watch list</h3><span class="small muted right">sodium, saturated fat, added sugar</span></div>${day.meals.length ? watchRows(day.watch) : html`<p class="muted small">Log a meal to see sodium, saturated fat and added sugar against your daily limits.</p>`}</div>
         <div class="card"><div class="card-h"><h3>Logged meals</h3></div>
-          ${day.meals.length ? html`<div class="list">${MEAL_TYPES.flatMap((mt) => day.meals.filter((m) => m.meal_type === mt)).map((m) => html`<div class="item"><div class="grow"><b>${m.name}</b><span class="small muted">${cap(m.meal_type)} · ${num(m.protein)}g P · ${num(m.carbs)}g C · ${num(m.fat)}g F</span></div>
+          ${day.meals.length ? html`<div class="list">${MEAL_TYPES.flatMap((mt) => day.meals.filter((m) => m.meal_type === mt)).map((m) => html`<div class="item"><div class="grow"><b>${m.name}</b><span class="small muted">${cap(m.meal_type)} · ${num(m.protein)}g P · ${num(m.carbs)}g C · ${num(m.fat)}g F · Sodium ${watchAmount(m.sodium_mg, 'mg', (m.nutrient_gaps & 1) !== 0)}</span></div>
             <b>${num(m.kcal)}</b><button class="icon-btn" data-del="${m.id}" aria-label="Delete ${m.name}">${icon('trash')}</button></div>`)}</div>`
             : emptyState('Nothing logged', 'Meals you add will show up here.')}</div>
       </div>
@@ -68,10 +71,25 @@ export default async function meals(root) {
   /* ---------- review screen helpers ---------- */
   const named = (i) => String(i.name || '').trim();
   const counted = () => draft.items.filter((i) => named(i) && !i._dirty && !i.unknown);
+  // Same rules as the server: a nutrient with no data (null) is not counted as zero. `gaps` says how many foods lack it.
   const sum = () => {
-    const t = counted().reduce((a, i) => ({ kcal: a.kcal + i.kcal, protein: a.protein + i.protein, carbs: a.carbs + i.carbs, fat: a.fat + i.fat, fiber: a.fiber + i.fiber }), { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 });
+    const rows = counted();
+    const t = rows.reduce((a, i) => ({ kcal: a.kcal + i.kcal, protein: a.protein + i.protein, carbs: a.carbs + i.carbs, fat: a.fat + i.fat, fiber: a.fiber + i.fiber }), { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 });
     const r1 = (v) => Math.round(v * 10) / 10;
-    return { kcal: Math.round(t.kcal), protein: r1(t.protein), carbs: r1(t.carbs), fat: r1(t.fat), fiber: r1(t.fiber) };
+    const out = { kcal: Math.round(t.kcal), protein: r1(t.protein), carbs: r1(t.carbs), fat: r1(t.fat), fiber: r1(t.fiber), gaps: {} };
+    for (const [key] of WATCH_FIELDS) {
+      const known = rows.filter((i) => i[key] != null);
+      const total = known.reduce((a, i) => a + i[key], 0);
+      out[key] = known.length ? (key === 'sodium_mg' ? Math.round(total) : r1(total)) : null;
+      out.gaps[key] = rows.length - known.length;
+    }
+    return out;
+  };
+  const watchLine = (i) => (i.unknown || i._dirty ? '' : WATCH_FIELDS.map(([key, label, unit]) => `${label} ${watchAmount(i[key], unit)}`).join(' · '));
+  const watchTotal = () => {
+    const t = sum();
+    return WATCH_FIELDS.map(([key, label, unit]) => `${label}: ${watchAmount(t[key], unit, t[key] != null && t.gaps[key] > 0)}`).join(' · ')
+      + (WATCH_FIELDS.some(([key]) => t[key] != null && t.gaps[key] > 0) ? ' (a minimum: some foods have no data)' : '');
   };
   const pending = () => draft.items.filter((i) => named(i) && i._dirty).length;
   const unknownCount = () => draft.items.filter((i) => i.unknown).length;
@@ -98,7 +116,8 @@ export default async function meals(root) {
     <div class="grid2"><div class="field"><label class="f" for="fn-${idx}">Food</label><input class="input" id="fn-${idx}" data-f="name" data-idx="${idx}" value="${i.name}" maxlength="80"></div>
       <div class="field"><label class="f" for="fq-${idx}">Amount</label><input class="input" id="fq-${idx}" data-f="quantity" data-idx="${idx}" value="${i.quantity || ''}" maxlength="60" placeholder="e.g. 2 pieces or 150 g"></div></div>
     <div class="field"><label class="f" for="fc-${idx}">Ingredients and cooking (optional)</label><input class="input" id="fc-${idx}" data-f="cooking" data-idx="${idx}" value="${i.cooking || ''}" maxlength="120" placeholder="e.g. oats flour and wheat flour, very little oil"></div>
-    <div class="small ${i.unknown ? '' : 'muted'}" id="nut-${idx}">${nutLine(i)}</div></div>`;
+    <div class="small ${i.unknown ? '' : 'muted'}" id="nut-${idx}">${nutLine(i)}</div>
+    <div class="small muted" id="wl-${idx}">${watchLine(i)}</div></div>`;
 
   const questionsBox = () => (draft.questions?.length ? html`<div class="qbox"><b>A few quick questions</b><p class="small muted">Answers make the estimate more accurate. You can skip any of them.</p>
     ${draft.questions.map((qn) => html`<div class="qrow"><div>${qn.text}</div>
@@ -116,6 +135,7 @@ export default async function meals(root) {
     <div class="row wrap" style="margin-top:10px"><button class="btn" type="button" id="add">+ Add a food</button><button class="btn" type="button" id="recalc" ${pending() ? '' : 'disabled'}>Recalculate edited foods</button></div>
     ${questionsBox()}
     <div class="row between" style="margin-top:14px"><b>Total</b><b id="tot">${num(t.kcal)} kcal · ${num(t.protein, 1)}g protein · ${num(t.carbs, 1)}g carbs · ${num(t.fat, 1)}g fat</b></div>
+    <div class="small muted" style="margin-top:4px;text-align:right" id="totw">${watchTotal()}</div>
     ${draft.notes ? html`<p class="small muted" style="margin-top:6px">${draft.notes}</p>` : ''}
     ${draft.recalcNote ? html`<p class="small muted" style="margin-top:6px">${draft.recalcNote}</p>` : ''}
     <p class="small" style="margin-top:6px;color:var(--amber, #8a5f0a)" id="st">${statusText()}</p>
@@ -147,9 +167,11 @@ export default async function meals(root) {
   const refresh = (idx) => {
     const it = draft.items[idx];
     const nut = $(`#nut-${idx}`); if (nut) { nut.textContent = nutLine(it); nut.classList.remove('muted'); }
+    const wl = $(`#wl-${idx}`); if (wl) wl.textContent = watchLine(it);
     const bd = $(`#bd-${idx}`); if (bd) bd.innerHTML = String(html`${badge(it)}`);
     const t = sum();
     $('#tot').textContent = `${num(t.kcal)} kcal · ${num(t.protein, 1)}g protein · ${num(t.carbs, 1)}g carbs · ${num(t.fat, 1)}g fat`;
+    $('#totw').textContent = watchTotal();
     $('#st').textContent = statusText();
     $('#log').disabled = !canLog();
     $('#recalc').disabled = pending() === 0;
@@ -213,11 +235,13 @@ export default async function meals(root) {
       if (!canLog()) return;
       const rows = counted();
       const deductions = $$('.dd').filter((c) => c.checked).map((c) => draft.shownMatches[Number(c.dataset.i)]).map(({ item_id, name, amount, unit }) => ({ item_id, name, amount, unit }));
-      const t = sum();
+      const { gaps, ...t } = sum();
       try {
         await post('/api/meals', {
           date, meal_type: type, name: rows.map((i) => i.name).join(', ').slice(0, 120),
-          serving: rows.map((i) => i.quantity).filter(Boolean).join(', ').slice(0, 80), ...t, source: draft.logSource, deductions
+          serving: rows.map((i) => i.quantity).filter(Boolean).join(', ').slice(0, 80), ...t,
+          gaps: WATCH_FIELDS.map(([key]) => key).filter((key) => t[key] != null && gaps[key] > 0), // stored value is a lower bound
+          source: draft.logSource, deductions
         });
         toast(deductions.length ? 'Meal logged and pantry updated' : 'Meal logged');
         draft = null; photo = null; text = ''; await load(); draw();
@@ -253,10 +277,12 @@ export default async function meals(root) {
     modal({
       title: 'Enter a meal manually',
       body: html`<div class="field"><label class="f" for="m-name">Meal</label><input class="input" id="m-name" maxlength="120"></div>
-        <div class="grid2">${f('m-kcal', 'Calories (kcal)')}${f('m-p', 'Protein (g)', '0')}${f('m-c', 'Carbs (g)', '0')}${f('m-f', 'Fats (g)', '0')}</div>${f('m-fi', 'Fiber (g)', '0')}<div class="err" id="m-err" role="alert"></div>`,
+        <div class="grid2">${f('m-kcal', 'Calories (kcal)')}${f('m-p', 'Protein (g)', '0')}${f('m-c', 'Carbs (g)', '0')}${f('m-f', 'Fats (g)', '0')}</div>${f('m-fi', 'Fiber (g)', '0')}
+        <p class="small muted" style="margin:6px 0">Optional. Leave a box empty if you do not know the number: empty means "no data", and 0 means none.</p>
+        <div class="grid2">${f('m-na', 'Sodium (mg)', 'no data')}${f('m-sf', 'Saturated fat (g)', 'no data')}${f('m-as', 'Added sugar (g)', 'no data')}</div><div class="err" id="m-err" role="alert"></div>`,
       actions: [{ label: 'Cancel' }, { label: 'Log meal', kind: 'primary', onClick: async () => {
         try {
-          await post('/api/meals', { date, meal_type: type, name: $('#m-name').value.trim(), kcal: $('#m-kcal').value, protein: $('#m-p').value || 0, carbs: $('#m-c').value || 0, fat: $('#m-f').value || 0, fiber: $('#m-fi').value || 0, source: 'manual' });
+          await post('/api/meals', { date, meal_type: type, name: $('#m-name').value.trim(), kcal: $('#m-kcal').value, protein: $('#m-p').value || 0, carbs: $('#m-c').value || 0, fat: $('#m-f').value || 0, fiber: $('#m-fi').value || 0, sodium_mg: $('#m-na').value, sat_fat: $('#m-sf').value, added_sugar: $('#m-as').value, source: 'manual' });
           await load(); draw(); toast('Meal logged'); return false;
         } catch (err) { $('#m-err').textContent = err.message; return true; }
       } }]

@@ -1,0 +1,101 @@
+/**
+ * Daily limits for the nutrients to keep an eye on: sodium, saturated fat and added sugar.
+ *
+ * These are CEILINGS to stay under, not targets to reach. They come from general public-health guidance
+ * (WHO, American Heart Association) and are for healthy people and the conditions the app already lists.
+ * They are not medical advice. The stricter limit wins when several apply.
+ *
+ *   Sodium         adults and teens 14+: under 2,000 mg (WHO)
+ *                  age 13: under 1,800 mg (US Dietary Reference Intakes, 9 to 13 years)
+ *                  high blood pressure: 1,500 mg (AHA ideal limit)
+ *   Saturated fat  under 10% of calories (WHO); high cholesterol: under 6% (AHA)
+ *   Added sugar    under 10% of calories (WHO); under 18: also at most 25 g (AHA);
+ *                  type 2 diabetes or PCOS: under 5% of calories (WHO "ideal", and common advice for these conditions)
+ */
+export const WATCH = [
+  { key: 'sodium_mg', label: 'Sodium', unit: 'mg', bit: 1 },
+  { key: 'sat_fat', label: 'Saturated fat', unit: 'g', bit: 2 },
+  { key: 'added_sugar', label: 'Added sugar', unit: 'g', bit: 4 }
+];
+export const WATCH_KEYS = WATCH.map((w) => w.key);
+
+/** Bit mask for a list of nutrient keys whose stored value is only a lower bound. */
+export const gapMask = (keys) => WATCH.reduce((m, w) => (Array.isArray(keys) && keys.includes(w.key) ? m | w.bit : m), 0);
+
+export function limitsOf(profile, targets) {
+  const age = profile?.age || null;
+  const conds = profile?.conditions || [];
+  const kcal = targets?.calories || 2000;
+  const minor = age != null && age < 18;
+
+  let sodium = age != null && age <= 13 ? 1800 : 2000;
+  let sodiumWhy = age != null && age <= 13 ? 'Under 1,800 mg a day for ages 9 to 13 (US Dietary Reference Intakes).' : 'Under 2,000 mg a day (World Health Organization).';
+  if (conds.includes('bp')) {
+    sodium = Math.min(sodium, 1500);
+    sodiumWhy = 'Up to 1,500 mg a day is the ideal limit for high blood pressure (American Heart Association).';
+  }
+
+  const satPct = conds.includes('chol') ? 6 : 10;
+  const satWhy = satPct === 6
+    ? 'Under 6% of your calories for high cholesterol (American Heart Association).'
+    : 'Under 10% of your calories (World Health Organization).';
+
+  let sugarPct = conds.includes('t2') || conds.includes('pcos') ? 5 : 10;
+  let sugar = Math.round((kcal * sugarPct) / 100 / 4);
+  let sugarWhy = sugarPct === 5
+    ? 'Under 5% of your calories, the stricter level often advised with type 2 diabetes or PCOS (World Health Organization).'
+    : 'Under 10% of your calories (World Health Organization).';
+  if (minor && sugar > 25) { sugar = 25; sugarWhy = 'At most 25 g a day for under 18s (American Heart Association).'; }
+
+  return {
+    sodium_mg: { limit: sodium, why: sodiumWhy },
+    sat_fat: { limit: Math.round((kcal * satPct) / 100 / 9), why: satWhy },
+    added_sugar: { limit: sugar, why: sugarWhy }
+  };
+}
+
+/** SQL fragments that total the watch nutrients and say how many meals have full data. */
+export const NUTRIENT_SQL = WATCH.map((w) =>
+  `SUM(${w.key}) AS ${w.key}, COUNT(${w.key}) AS ${w.key}_n, SUM(CASE WHEN ${w.key} IS NOT NULL AND (nutrient_gaps & ${w.bit}) != 0 THEN 1 ELSE 0 END) AS ${w.key}_gap`
+).join(', ');
+
+const round = (key, v) => (v == null ? null : key === 'sodium_mg' ? Math.round(v) : Math.round(v * 10) / 10);
+
+/**
+ * Reads the nutrient columns of a totals row, for `meals` meals.
+ * value: the sum of what is known (null when no meal has any data).
+ * complete: meals whose figure is complete. partial: some meal is missing data or is only a lower bound,
+ * so the value is "at least" that much.
+ */
+export function readNutrients(row, meals) {
+  const out = {};
+  for (const w of WATCH) {
+    const known = row[`${w.key}_n`] || 0;
+    const complete = known - (row[`${w.key}_gap`] || 0);
+    out[w.key] = { value: round(w.key, row[w.key]), complete, total: meals, partial: meals > 0 && complete < meals };
+  }
+  return out;
+}
+
+/**
+ * One status per watched nutrient against its limit.
+ *   none    nothing logged
+ *   unknown meals are logged but none has data
+ *   over    above the limit (true even when data is partial, because the real figure can only be higher)
+ *   unsure  under the limit so far, but some meals have no data, so the real figure may be higher
+ *   near    complete data, 85% or more of the limit
+ *   ok      complete data, under 85% of the limit
+ */
+export function watchOf(nutrients, limits) {
+  return WATCH.map((w) => {
+    const n = nutrients[w.key];
+    const lim = limits[w.key];
+    let status;
+    if (!n.total) status = 'none';
+    else if (n.value == null) status = 'unknown';
+    else if (n.value > lim.limit) status = 'over';
+    else if (n.partial) status = 'unsure';
+    else status = n.value >= lim.limit * 0.85 ? 'near' : 'ok';
+    return { key: w.key, label: w.label, unit: w.unit, limit: lim.limit, why: lim.why, ...n, status };
+  });
+}

@@ -3,13 +3,19 @@
  * into numbers, and sanity-checks estimates that came from the AI.
  *
  * What is calculated exactly: the table value of the food (or the recipe built from ingredient quantities),
- * plus the calories of any oil, ghee or butter the note describes, plus a flour blend for flatbreads.
- * What is NOT calculated: any other detail in the note (spices, gravy base, sugar and so on). Those are kept
- * as text only, and the result says so.
+ * plus the calories of any oil, ghee or butter the note describes, plus a flour blend for flatbreads, plus
+ * the salt (sodium) a note describes. What is NOT calculated: any other detail in the note (spices, gravy
+ * base, sugar and so on). Those are kept as text only, and the result says so.
+ *
+ * Missing data: sodium, saturated fat and added sugar are `null` when a food has no reliable figure.
+ * null is never turned into 0 here; it stays null so the app can say "no data".
  */
-import { FOOD_TABLE, FAT_SOURCES, composeRecipe, findFood, estimateGrams, nutritionFor } from './foods.js';
+import { FOOD_TABLE, FAT_SOURCES, composeRecipe, findFood, estimateGrams, nutritionFor, simplifyFractions, saltSodium } from './foods.js';
+import { SALT_G_PER_TSP, SODIUM_MG_PER_G_SALT } from './food-nutrients.js';
 
 const r1 = (v) => Math.round(v * 10) / 10;
+const opt1 = (v) => (v == null ? null : r1(v));
+const optInt = (v) => (v == null ? null : Math.round(v));
 const byName = (name) => FOOD_TABLE.find((f) => f.name === name);
 
 /** Prepared foods whose table value already includes typical cooking fat. Plain ready foods are listed here. */
@@ -31,6 +37,7 @@ const FLOUR_WORDS = [
 function fatType(text) {
   if (/\b(ghee|clarified butter|vanaspati|dalda)\b/.test(text)) return 'ghee';
   if (/\bbutter\b/.test(text)) return 'butter';
+  if (/\bcoconut oil\b/.test(text)) return 'coconut';
   return 'oil';
 }
 
@@ -40,7 +47,7 @@ function explicitFat(text) {
   const unit = '(tsp|teaspoons?|tbsp|tablespoons?|ml|grams?|gm|g)';
   const fat = '((?:olive |coconut |mustard |sunflower |groundnut |refined )?oil|ghee|butter|vanaspati|dalda)';
   const adj = '(?:extra |more |additional |fresh |melted |pure |desi )?';
-  const forward = new RegExp(`${num}\\s*${unit}\\b\\s*(?:of\\s+)?${adj}${fat}`);
+  const forward = new RegExp(`\\b${num}\\s*${unit}\\b\\s*(?:of\\s+)?${adj}${fat}`);
   const backward = new RegExp(`${fat}\\s*[:\\-]?\\s*${num}\\s*${unit}\\b`);
   let m = forward.exec(text);
   let amount; let u; let f;
@@ -55,16 +62,56 @@ function explicitFat(text) {
   let g;
   if (u.startsWith('tsp') || u.startsWith('teaspoon')) g = n * perTsp;
   else if (u.startsWith('tbsp') || u.startsWith('tablespoon')) g = n * perTsp * 3;
-  else if (u === 'ml') g = n * (type === 'oil' ? 0.92 : 0.91);
+  else if (u === 'ml') g = n * (type === 'oil' || type === 'coconut' ? 0.92 : 0.91);
   else g = n;
-  const extra = /\b(extra|additional|more|on top|drizzl\w*|topped)\b/.test(text);
-  return { type, grams: g, extra, label: `${n} ${u} ${type}${extra ? ' (extra)' : ''}` };
+  // "extra" counts only next to the fat it describes ("extra salt" must not turn a ghee amount into extra ghee).
+  const before = text.slice(Math.max(0, m.index - 12), m.index);
+  const extra = /\b(extra|additional|more)\b/.test(m[0]) || /\b(extra|additional|more)\s*$/.test(before) || /\b(on top|drizzl\w*|topped)\b/.test(text);
+  return { type, grams: g, extra, label: `${n} ${u} ${FAT_SOURCES[type].label}${extra ? ' (extra)' : ''}` };
+}
+
+/**
+ * Parses salt in a cooking note. Returns one of:
+ *   { mode: 'amount', grams, extra, label }   "1/2 tsp salt", "a pinch of salt", "1 tsp extra salt"
+ *   { mode: 'none' }                          "no salt", "salt free", "unsalted"
+ *   { mode: 'factor', factor, label }         "low salt" (x0.5), "extra salt" (x1.5)
+ * or null when the note does not mention salt.
+ */
+function parseSalt(text) {
+  if (!/\b(salt|salty|salted|unsalted|sodium)\b|salt[- ]?free/.test(text)) return null;
+  const num = '(\\d+(?:\\.\\d+)?|a|one|half|two|three)';
+  const unit = '(tsp|teaspoons?|tbsp|tablespoons?|pinch(?:es)?|grams?|gm|g)';
+  const kind = '(?:extra |more |additional |rock |sea |table |iodi[sz]ed |black |pink |himalayan )*';
+  const forward = new RegExp(`\\b${num}\\s*${unit}\\b\\s*(?:of\\s+)?${kind}salt`);
+  const backward = new RegExp(`salt\\s*[:\\-]?\\s*${num}\\s*${unit}\\b`);
+  let m = forward.exec(text);
+  let amount; let u;
+  if (m) { [, amount, u] = m; } else {
+    m = backward.exec(text);
+    if (m) [, amount, u] = m;
+  }
+  if (m) {
+    const words = { a: 1, one: 1, half: 0.5, two: 2, three: 3 };
+    const n = words[amount] ?? parseFloat(amount);
+    let g;
+    if (u.startsWith('tsp') || u.startsWith('teaspoon')) g = n * SALT_G_PER_TSP;
+    else if (u.startsWith('tbsp') || u.startsWith('tablespoon')) g = n * SALT_G_PER_TSP * 3;
+    else if (u.startsWith('pinch')) g = n * 0.4;
+    else g = n;
+    const before = text.slice(Math.max(0, m.index - 12), m.index);
+    const extra = /\b(extra|more|additional)\b/.test(m[0]) || /\b(extra|more|additional)\s*$/.test(before);
+    return { mode: 'amount', grams: g, extra, label: `${n} ${u} salt${extra ? ' (extra)' : ''}` };
+  }
+  if (/\b(no|without|zero|skip(?:ped)?)\s+(?:added\s+)?(?:salt|sodium)\b|salt[- ]?free|\bunsalted\b|\bno added salt\b/.test(text)) return { mode: 'none' };
+  if (/\b(low|less|little|light|reduced|minimal|very little)\s+(?:salt|sodium)\b|\bbarely any salt\b/.test(text)) return { mode: 'factor', factor: 0.5, label: 'low salt (half the usual)' };
+  if (/\b(extra|more|lots? of|a lot of|plenty of|heavy|too much|high)\s+(?:salt|sodium)\b|\bsalty\b/.test(text)) return { mode: 'factor', factor: 1.5, label: 'extra salt (1.5 times the usual)' };
+  return null;
 }
 
 /** Reads a cooking note. Returns what can be calculated and what is only recorded. */
 export function parseCooking(rawText) {
-  const text = String(rawText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const out = { fat: null, flours: null, notes: [] };
+  const text = simplifyFractions(String(rawText || '')).toLowerCase().replace(/\s+/g, ' ').trim();
+  const out = { fat: null, flours: null, salt: null, notes: [] };
   if (!text) return out;
 
   const explicit = explicitFat(text);
@@ -81,6 +128,8 @@ export function parseCooking(rawText) {
     else if (/\bbak(e|ed|ing)\b|\broast/.test(text)) level = 'none';
     if (level) out.fat = { mode: 'level', type, per100: LEVELS[level], level };
   }
+
+  out.salt = parseSalt(text);
 
   // Flour blend for flatbreads: look for flour names and optional percentages.
   const found = [];
@@ -116,7 +165,30 @@ export function parseCooking(rawText) {
   return out;
 }
 
-const vecOf = (food, g) => nutritionFor(food, g);
+/** Rounds a nutrient vector for display: calories and sodium to whole numbers, the rest to one decimal. null stays null. */
+export function roundVec(v) {
+  return {
+    kcal: Math.round(v.kcal), protein: r1(v.protein), carbs: r1(v.carbs), fat: r1(v.fat), fiber: r1(v.fiber),
+    sodium_mg: optInt(v.sodium_mg), sat_fat: opt1(v.sat_fat), added_sugar: opt1(v.added_sugar)
+  };
+}
+
+/** Adds `g` grams of cooking fat to a rounded nutrition result. */
+function withFat(nutrition, type, g) {
+  const src = FAT_SOURCES[type];
+  return {
+    ...nutrition,
+    kcal: Math.round(nutrition.kcal + src.kcal * g),
+    protein: r1(nutrition.protein + src.protein * g),
+    carbs: r1(nutrition.carbs + src.carbs * g),
+    fat: r1(nutrition.fat + src.fat * g),
+    sodium_mg: nutrition.sodium_mg == null ? null : Math.round(nutrition.sodium_mg + src.sodium * g),
+    sat_fat: nutrition.sat_fat == null ? null : r1(nutrition.sat_fat + src.sat * g)
+  };
+}
+
+/** Adds sodium from `g` grams of salt. No data stays no data. */
+const withSalt = (nutrition, g) => ({ ...nutrition, sodium_mg: nutrition.sodium_mg == null ? null : Math.round(nutrition.sodium_mg + saltSodium(g)) });
 
 /**
  * Nutrition for `grams` of `food` described by a cooking note.
@@ -132,7 +204,7 @@ export function applyCooking(food, gramsEaten, cookingText, nameText = '') {
   const details = [];
   let used = false;
 
-  // 1. Recipe dishes are recomposed from their ingredients so the flour blend and the fat can change.
+  // 1. Recipe dishes are recomposed from their ingredients so the flour blend, the fat and the salt can change.
   if (food.recipe) {
     const overrides = {};
     const spec = food.recipe;
@@ -155,39 +227,47 @@ export function applyCooking(food, gramsEaten, cookingText, nameText = '') {
         details.push(`${cook.fat.label} for the whole portion`);
       } else {
         overrides.fat = cook.fat.per100 > 0 ? [cook.fat.type, (cook.fat.per100 * spec.yield) / 100] : null;
-        details.push(cook.fat.per100 > 0 ? `${cook.fat.level} ${cook.fat.type} (about ${cook.fat.per100} g per 100 g)` : 'no added oil');
+        details.push(cook.fat.per100 > 0 ? `${cook.fat.level} ${FAT_SOURCES[cook.fat.type].label} (about ${cook.fat.per100} g per 100 g)` : 'no added oil');
       }
+    }
+    const usualSalt = spec.salt || 0;
+    let extraSaltG = 0;
+    if (cook.salt) {
+      used = true;
+      if (cook.salt.mode === 'none') { overrides.salt = 0; details.push('no added salt'); }
+      else if (cook.salt.mode === 'factor') { overrides.salt = usualSalt * cook.salt.factor; details.push(cook.salt.label); }
+      else if (cook.salt.extra) { extraSaltG = cook.salt.grams; details.push(`${cook.salt.label} on top of the usual recipe`); }
+      else { overrides.salt = (cook.salt.grams / gramsEaten) * spec.yield; details.push(`${cook.salt.label} for the whole portion`); }
     }
     const v = composeRecipe(spec, overrides);
     const k = gramsEaten / 100;
-    const nutrition = { kcal: Math.round(v.kcal * k), protein: r1(v.protein * k), carbs: r1(v.carbs * k), fat: r1(v.fat * k), fiber: r1(v.fiber * k) };
-    if (cook.fat?.mode === 'amount' && cook.fat.extra) {
-      const src = FAT_SOURCES[cook.fat.type];
-      nutrition.kcal = Math.round(nutrition.kcal + src.kcal * cook.fat.grams);
-      nutrition.fat = r1(nutrition.fat + src.fat * cook.fat.grams);
-    }
+    let nutrition = roundVec(Object.fromEntries(Object.entries(v).map(([key, val]) => [key, val == null ? null : val * k])));
+    if (cook.fat?.mode === 'amount' && cook.fat.extra) nutrition = withFat(nutrition, cook.fat.type, cook.fat.grams);
+    if (extraSaltG) nutrition = withSalt(nutrition, extraSaltG);
     return { nutrition, detail: describe(details, used, cookingText), understood: used };
   }
 
-  // 2. Any other food: table value, plus cooking fat when it is not already included.
-  let nutrition = vecOf(food, gramsEaten);
+  // 2. Any other food: table value, plus cooking fat when it is not already included, plus any salt amount stated.
+  let nutrition = nutritionFor(food, gramsEaten);
   if (cook.fat) {
-    const src = FAT_SOURCES[cook.fat.type];
     let fatG = 0;
     if (cook.fat.mode === 'amount') fatG = cook.fat.grams;
     else if (!embedsFat(food)) fatG = (cook.fat.per100 * gramsEaten) / 100;
     if (fatG > 0) {
       used = true;
-      nutrition = {
-        kcal: Math.round(nutrition.kcal + src.kcal * fatG),
-        protein: r1(nutrition.protein + src.protein * fatG),
-        carbs: r1(nutrition.carbs + src.carbs * fatG),
-        fat: r1(nutrition.fat + src.fat * fatG),
-        fiber: nutrition.fiber
-      };
-      details.push(`added ${r1(fatG)} g ${cook.fat.type} (${Math.round(src.kcal * fatG)} kcal)`);
+      nutrition = withFat(nutrition, cook.fat.type, fatG);
+      details.push(`added ${r1(fatG)} g ${FAT_SOURCES[cook.fat.type].label} (${Math.round(FAT_SOURCES[cook.fat.type].kcal * fatG)} kcal)`);
     } else if (cook.fat.mode === 'level' && embedsFat(food)) {
       details.push('this dish already includes typical cooking oil in its table value');
+    }
+  }
+  if (cook.salt) {
+    if (cook.salt.mode === 'amount') {
+      used = true;
+      nutrition = withSalt(nutrition, cook.salt.grams);
+      details.push(food.sodium_mg == null ? `${cook.salt.label} (sodium for this food is not known, so the total stays unknown)` : `added ${cook.salt.label} (${Math.round(saltSodium(cook.salt.grams))} mg sodium)`);
+    } else if (cook.salt.mode === 'factor') {
+      details.push('salt level only changes dishes we calculate from a recipe; the table value is used as listed');
     }
   }
   return { nutrition, detail: describe(details, used, cookingText), understood: used };
@@ -195,7 +275,7 @@ export function applyCooking(food, gramsEaten, cookingText, nameText = '') {
 
 function describe(details, used, cookingText) {
   if (!String(cookingText || '').trim()) return '';
-  if (!used && !details.length) return 'Cooking note saved, but only oil, ghee, butter and flours change the calculation.';
+  if (!used && !details.length) return 'Cooking note saved, but only oil, ghee, butter, salt and flours change the calculation.';
   return `Includes ${details.join('; ')}.`;
 }
 
@@ -208,6 +288,40 @@ export function statedGrams(quantity) {
   const n = parseFloat(m[1]);
   const unit = m[2].toLowerCase();
   return unit === 'kg' || unit === 'l' || unit.startsWith('lit') ? n * 1000 : n;
+}
+
+/**
+ * Checks sodium, saturated fat and added sugar on an item (from the AI or the user).
+ *  - A value that is missing, not a number or negative becomes null (no data), never 0.
+ *  - Saturated fat cannot exceed total fat, and added sugar cannot exceed total carbohydrate: they are lowered.
+ *  - Sodium cannot exceed what the food would hold if it were pure salt (393 mg per gram): such a value
+ *    is thrown away and becomes null, because the number cannot be trusted at all.
+ * `g` is the stated weight in grams when known. Returns the notes to show the user.
+ */
+export function checkNutrients(item, g) {
+  const notes = [];
+  const clean = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
+  item.sodium_mg = clean(item.sodium_mg);
+  item.sat_fat = clean(item.sat_fat);
+  item.added_sugar = clean(item.added_sugar);
+
+  if (item.sat_fat != null && item.sat_fat > item.fat + 0.05) {
+    item.sat_fat = r1(item.fat);
+    notes.push('saturated fat was higher than total fat, so it was lowered');
+  }
+  if (item.added_sugar != null && item.added_sugar > item.carbs + 0.05) {
+    item.added_sugar = r1(item.carbs);
+    notes.push('added sugar was higher than total carbohydrate, so it was lowered');
+  }
+  const saltCeiling = g ? g * SODIUM_MG_PER_G_SALT : 30000;
+  if (item.sodium_mg != null && item.sodium_mg > saltCeiling) {
+    item.sodium_mg = null;
+    notes.push('the sodium figure was impossible for this amount of food, so it was removed');
+  }
+  if (item.sodium_mg != null) item.sodium_mg = Math.round(item.sodium_mg);
+  if (item.sat_fat != null) item.sat_fat = r1(item.sat_fat);
+  if (item.added_sugar != null) item.added_sugar = r1(item.added_sugar);
+  return notes;
 }
 
 /**
@@ -236,7 +350,10 @@ export function checkEstimate(item) {
     }
   }
 
-  // 3. Compare with the built-in table when we know the food and the amount (not for custom-cooked items).
+  // 3. Sodium, saturated fat and added sugar (run after the macros above, because they depend on them).
+  notes.push(...checkNutrients(out, g));
+
+  // 4. Compare with the built-in table when we know the food and the amount (not for custom-cooked items).
   const food = findFood(out.name, 'meal');
   if (food && !out.cooking) {
     const grams = g ?? (out.quantity ? estimateGrams(out.quantity, food).grams : null);

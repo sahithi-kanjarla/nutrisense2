@@ -1,6 +1,7 @@
 import { q } from './db.js';
 import { daysBetween } from './dates.js';
 import { findFood, normalize } from './foods.js';
+import { NUTRIENT_SQL, limitsOf, readNutrients, watchOf } from './limits.js';
 
 const parse = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
 
@@ -57,12 +58,18 @@ export function stockGrams(item) {
 export function dayTotals(userId, date) {
   const r = q.get(
     `SELECT COALESCE(SUM(kcal),0) AS kcal, COALESCE(SUM(protein),0) AS protein, COALESCE(SUM(carbs),0) AS carbs,
-            COALESCE(SUM(fat),0) AS fat, COALESCE(SUM(fiber),0) AS fiber, COUNT(*) AS count
+            COALESCE(SUM(fat),0) AS fat, COALESCE(SUM(fiber),0) AS fiber, COUNT(*) AS count, ${NUTRIENT_SQL}
      FROM meals WHERE user_id = ? AND date = ?`, userId, date
   );
+  const nutrients = readNutrients(r, r.count);
   const round1 = (n) => Math.round(n * 10) / 10;
-  return { kcal: Math.round(r.kcal), protein: round1(r.protein), carbs: round1(r.carbs), fat: round1(r.fat), fiber: round1(r.fiber), count: r.count };
+  return { kcal: Math.round(r.kcal), protein: round1(r.protein), carbs: round1(r.carbs), fat: round1(r.fat), fiber: round1(r.fiber), count: r.count,
+    // Sodium, saturated fat and added sugar: null = no meal has data (never 0). See limits.js for what partial means.
+    sodium_mg: nutrients.sodium_mg.value, sat_fat: nutrients.sat_fat.value, added_sugar: nutrients.added_sugar.value, nutrients };
 }
+
+/** The watch list (sodium, saturated fat, added sugar) for a day's totals, against this person's limits. */
+export const watchFor = (profile, totals) => watchOf(totals.nutrients, limitsOf(profile, targetsOf(profile)));
 
 export function remainingOf(targets, totals) {
   return {
