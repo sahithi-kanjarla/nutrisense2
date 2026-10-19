@@ -35,12 +35,18 @@ export function publicProfile(p) {
   return rest;
 }
 
+/** Turns the JSON text columns of a scanned pantry row into objects. Plain rows come back with nulls. */
+export function decodeLabel(r) {
+  const json = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+  return { ...r, allergens: json(r.allergens), label_nutrition: json(r.label_nutrition) };
+}
+
 /** Pantry rows with days left and a freshness status relative to `today`. */
 export function getPantry(userId, today) {
   return q.all('SELECT * FROM pantry_items WHERE user_id = ? ORDER BY name COLLATE NOCASE', userId).map((r) => {
     const days_left = r.expires_on ? daysBetween(today, r.expires_on) : null;
     const status = days_left === null ? 'ok' : days_left < 0 ? 'expired' : days_left <= 3 ? 'soon' : 'ok';
-    return { ...r, days_left, status };
+    return { ...decodeLabel(r), days_left, status };
   });
 }
 

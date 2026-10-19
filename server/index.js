@@ -9,6 +9,7 @@ import { aiStatus } from './lib/ai/index.js';
 import * as auth from './routes/auth.js';
 import * as profile from './routes/profile.js';
 import * as pantry from './routes/pantry.js';
+import * as scan from './routes/scan.js';
 import * as meals from './routes/meals.js';
 import * as dashboard from './routes/dashboard.js';
 import * as ai from './routes/ai.js';
@@ -19,7 +20,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 
 export function buildServer() {
   const router = createRouter();
-  for (const mod of [auth, profile, pantry, meals, dashboard, ai, planner, account]) mod.register(router);
+  for (const mod of [auth, profile, pantry, scan, meals, dashboard, ai, planner, account]) mod.register(router);
   router.add('GET', '/api/health', async () => ({ ok: true, ai: aiStatus() }), { auth: false });
 
   const CSP = [
